@@ -25,10 +25,10 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 <!-- Closed-ticket links and one-line gists go here. -->
 
 - [Research the Go, PostgreSQL, and TUI foundations](research-the-go-postgresql-tui-foundations.md) — Use a CGO-free Go 1.26/Bubble Tea v2/pgx v5 stack with a custom editable grid, OS keyrings, layered tests, and GoReleaser-built macOS/Linux artifacts.
+- [Prototype the end-to-end interaction model](prototype-the-end-to-end-interaction-model.md) — Use a root-owned focus model, layered keyboard/mouse interactions, stateful mixed tabs, safe modals, stable feedback, and progressive single-pane degradation.
 
 ## Not yet specified
 
-- Details exposed by the interaction prototype, especially compact-terminal behavior, focus transitions, modal flows, and discoverability.
 - Edge cases exposed by real PostgreSQL schemas and data types after the first end-to-end browsing slice exists.
 - Recovery behavior that only becomes concrete after connection, query, cancellation, and mutation paths are integrated.
 - Release hardening discovered by testing packaged binaries on representative macOS and Linux environments.
