@@ -26,6 +26,7 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 
 - [Research the Go, PostgreSQL, and TUI foundations](research-the-go-postgresql-tui-foundations.md) — Use a CGO-free Go 1.26/Bubble Tea v2/pgx v5 stack with a custom editable grid, OS keyrings, layered tests, and GoReleaser-built macOS/Linux artifacts.
 - [Prototype the end-to-end interaction model](prototype-the-end-to-end-interaction-model.md) — Use a root-owned focus model, layered keyboard/mouse interactions, stateful mixed tabs, safe modals, stable feedback, and progressive single-pane degradation.
+- [Define connection profile behavior](define-connection-profile-behavior.md) — Use field-based profiles with creation-time URL import, explicit test/save/connect actions, per-profile keychain control, safe reconnect, and atomic versioned non-secret storage.
 
 ## Not yet specified
 
