@@ -1,0 +1,48 @@
+version: 2
+
+project_name: db-tui
+
+builds:
+  - id: db-tui
+    main: ./cmd/db-tui
+    binary: db-tui
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X main.version={{ .Version }}
+        -X main.commit={{ .Commit }}
+        -X main.date={{ .Date }}
+
+archives:
+  - id: release
+    ids:
+      - db-tui
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+    disable: false
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  disable: true

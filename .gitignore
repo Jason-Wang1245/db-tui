@@ -1,0 +1,6 @@
+/coverage.out
+/dist/
+/db-tui
+*.prof
+*.test
+.DS_Store
