@@ -29,6 +29,7 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 - [Define connection profile behavior](define-connection-profile-behavior.md) — Use field-based profiles with creation-time URL import, explicit test/save/connect actions, per-profile keychain control, safe reconnect, and atomic versioned non-secret storage.
 - [Define record browsing and staged CRUD semantics](define-record-browsing-and-staged-crud-semantics.md) — Use deterministic keyset browsing for keyed relations, best-effort read-only keyless browsing, explicit per-tab staging, atomic `xmin`-guarded applies, and conservative relation/type editability.
 - [Define SQL tab execution behavior](define-sql-tab-execution-behavior.md) — Use explicit selection-or-buffer execution, unchanged server-parsed batches, isolated per-run sessions, bounded ordered results, deliberate cancellation/reruns, and safe dirty-tab handling.
+- [Define the release quality bar](define-the-release-quality-bar.md) — Require four native macOS/Linux artifacts, PostgreSQL 14-through-current compatibility, layered automated/manual/security/accessibility/performance gates, verified unsigned releases, and immutable gated publication.
 
 ## Not yet specified
 
@@ -44,5 +45,6 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 - Query history and saved-query management.
 - Cross-execution SQL transactions or other persistent SQL-session state.
 - SQL IDE features such as syntax highlighting, autocomplete, formatting, and current-statement parsing; result-file export.
+- Apple Developer ID signing and notarization for the first release.
 - Schema design, migrations, and dedicated DDL editors; custom SQL remains available for DDL.
 - Reproducing TablePlus or lazygit feature-for-feature.
