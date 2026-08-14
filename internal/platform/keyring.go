@@ -9,7 +9,7 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
 )
 
-var ErrSecretNotFound = errors.New("secret not found")
+var ErrSecretNotFound = profile.ErrSecretNotFound
 
 var _ profile.SecretStore = Keyring{}
 

@@ -1,6 +1,9 @@
 package launcher
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type ConnectionTarget struct {
 	Host               string
@@ -15,10 +18,15 @@ type Credential struct {
 	Password string
 }
 
+type Clock interface {
+	Now() time.Time
+}
+
 type ConnectionInfo struct {
 	ServerVersion string
 	Database      string
 	Server        string
+	Latency       time.Duration
 }
 
 type Session interface {

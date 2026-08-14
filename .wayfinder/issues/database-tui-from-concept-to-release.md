@@ -32,6 +32,7 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 - [Define the release quality bar](define-the-release-quality-bar.md) — Require four native macOS/Linux artifacts, PostgreSQL 14-through-current compatibility, layered automated/manual/security/accessibility/performance gates, verified unsigned releases, and immutable gated publication.
 - [Choose the application architecture](choose-the-application-architecture.md) — Use a single-binary feature-oriented modular monolith with root-owned Bubble Tea state, typed request/result commands, narrow service interfaces, structured cancellation, sanitized errors, and enforced dependency seams.
 - [Bootstrap the project and CI](bootstrap-the-project-and-ci.md) — Established the pinned Go 1.26 modular-monolith skeleton, executable and service seams, layered tests, PostgreSQL Testcontainers matrix, native smoke workflow, and verified four-target release snapshots.
+- [Implement secure connection management](implement-secure-connection-management.md) — Added the responsive profile launcher, safe URL import and validation, atomic non-secret persistence, UUID-keyed keychain/session password lifecycle, cancellable PostgreSQL testing, and sanitized actionable connection errors.
 
 ## Not yet specified
 

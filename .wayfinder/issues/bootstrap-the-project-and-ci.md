@@ -19,7 +19,7 @@ Completed the project and CI bootstrap on 2026-08-13.
 
 ### Module and executable
 
-- Initialized `github.com/Jason-Wang1245/db-tui` for Go 1.26 with `toolchain go1.26.5` and committed `go.mod`/`go.sum` dependency locks.
+- Initialized `github.com/Jason-Wang1245/db-tui` for Go 1.26 with the patched `toolchain go1.26.6` and committed `go.mod`/`go.sum` dependency locks.
 - Pinned Bubble Tea v2, Bubbles v2, Lip Gloss v2, pgx v5, OS keyring, Testcontainers PostgreSQL, and the `govulncheck` Go tool to exact releases.
 - Added the single `cmd/db-tui` composition root with non-interactive `--help` and `--version`, build-time version/commit/date injection, error exit codes, and a functional Bubble Tea v2 bootstrap launcher.
 - Added a minimal README, development targets, and repository ignores; no license file was added per the release-quality decision.
