@@ -13,6 +13,7 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
 	"github.com/Jason-Wang1245/db-tui/internal/ui"
+	"github.com/Jason-Wang1245/db-tui/internal/workspace"
 )
 
 type ProfileService interface {
@@ -39,20 +40,24 @@ const (
 )
 
 type Model struct {
-	width         int
-	height        int
-	diagnostics   *Diagnostics
-	theme         ui.Theme
-	launcher      launcher.Model
-	launcherReady bool
-	profiles      ProfileService
-	connector     launcher.Connector
-	cancellations *CancellationRegistry
-	surface       surface
-	session       launcher.Session
-	connected     launcher.Profile
-	connection    launcher.ConnectionInfo
-	warning       *core.Error
+	width          int
+	height         int
+	diagnostics    *Diagnostics
+	theme          ui.Theme
+	launcher       launcher.Model
+	launcherReady  bool
+	profiles       ProfileService
+	connector      launcher.Connector
+	cancellations  *CancellationRegistry
+	surface        surface
+	session        launcher.Session
+	connected      launcher.Profile
+	connection     launcher.ConnectionInfo
+	warning        *core.Error
+	workspace      workspace.Model
+	workspaceReady bool
+	catalog        workspace.CatalogReader
+	nextWorkspace  uint64
 }
 
 type connectionSucceededMsg struct {
@@ -61,6 +66,12 @@ type connectionSucceededMsg struct {
 	info    launcher.ConnectionInfo
 	warning *core.Error
 	request core.RequestID
+}
+
+type reconnectionSucceededMsg struct {
+	session launcher.Session
+	info    launcher.ConnectionInfo
+	meta    core.RequestMeta
 }
 
 func New(deps Dependencies) Model {
@@ -79,6 +90,7 @@ func New(deps Dependencies) Model {
 		connector:     deps.Connector,
 		cancellations: cancellations,
 		surface:       surfaceLauncher,
+		nextWorkspace: 1,
 	}
 	if deps.Profiles != nil && deps.Connector != nil {
 		model.launcher = launcher.NewModel()
@@ -103,6 +115,9 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.launcher.SetSize(message.Width, message.Height)
 			model.layoutLauncherHitboxes()
 		}
+		if model.workspaceReady {
+			model.workspace.SetSize(message.Width, message.Height)
+		}
 		return model, nil
 	case launcher.LoadProfilesIntent:
 		return model, model.loadProfiles(message)
@@ -120,9 +135,31 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, model.importURL(message)
 	case launcher.CancelIntent:
 		return model, model.cancel(message)
+	case workspace.LoadSchemasIntent:
+		return model, model.loadSchemas(message)
+	case workspace.LoadRelationsIntent:
+		return model, model.loadRelations(message)
+	case workspace.CheckConnectionIntent:
+		return model, model.checkWorkspaceConnection(message)
+	case workspace.ReconnectIntent:
+		return model, model.reconnectWorkspace(message)
+	case workspace.CancelIntent:
+		return model, model.cancelWorkspace(message)
+	case workspace.DisconnectIntent:
+		return model.disconnectWorkspace()
+	case workspace.QuitIntent:
+		return model, model.shutdownCommand()
 	case connectionSucceededMsg:
 		if !model.launcher.Expects(launcher.ActionConnect, message.request) {
 			message.session.Close()
+			return model, nil
+		}
+		catalog := catalogFromSession(message.session)
+		if catalog == nil {
+			message.session.Close()
+			model.launcher.Update(launcher.OperationFailedMsg{
+				Action: launcher.ActionConnect, Err: catalogUnavailableError(), Request: message.request,
+			})
 			return model, nil
 		}
 		model.launcher.Update(launcher.ConnectedMsg{Request: message.request})
@@ -134,28 +171,52 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.connection = message.info
 		model.warning = message.warning
 		model.surface = surfaceWorkspace
+		model.catalog = catalog
+		workspaceID := core.WorkspaceID(fmt.Sprintf("workspace-%d", model.nextWorkspace))
+		model.nextWorkspace++
+		model.workspace = workspace.NewModel(
+			workspaceID, message.profile.Name, message.info.Database, message.info.Server,
+			message.info.ServerVersion, message.warning,
+		)
+		model.workspaceReady = true
+		model.workspace.SetSize(model.width, model.height)
 		model.diagnostics.Record(Diagnostic{Operation: "connect", Status: "success"})
-		return model, nil
+		return model, model.workspace.Init()
+	case reconnectionSucceededMsg:
+		if !model.workspaceReady || !model.workspace.ExpectsReconnect(message.meta) {
+			message.session.Close()
+			return model, nil
+		}
+		catalog := catalogFromSession(message.session)
+		if catalog == nil {
+			message.session.Close()
+			return model, model.workspace.Update(workspace.ReconnectFailed(message.meta, catalogUnavailableError()))
+		}
+		model.cancellations.CancelAll()
+		if model.session != nil {
+			model.session.Close()
+		}
+		model.session = message.session
+		model.catalog = catalog
+		model.connection = message.info
+		model.diagnostics.Record(Diagnostic{Operation: "reconnect", Status: "success"})
+		return model, model.workspace.Update(workspace.ReconnectedMsg{Meta: message.meta})
 	case tea.KeyPressMsg:
 		if message.Keystroke() == "ctrl+c" {
+			if model.surface == surfaceWorkspace && model.workspaceReady {
+				return model, model.workspace.Update(message)
+			}
 			return model, model.shutdownCommand()
 		}
 		if model.surface == surfaceWorkspace {
-			switch message.Keystroke() {
-			case "q":
-				return model, model.shutdownCommand()
-			case "esc":
-				session := model.session
-				model.session = nil
-				model.surface = surfaceLauncher
-				model.warning = nil
-				return model, tea.Sequence(closeSessionCommand(session), model.launcher.Reload())
-			}
-			return model, nil
+			return model, model.workspace.Update(message)
 		}
 		if model.launcherReady && message.Keystroke() == "q" && model.launcher.CanQuit() {
 			return model, model.shutdownCommand()
 		}
+	}
+	if model.workspaceReady && model.surface == surfaceWorkspace {
+		return model, model.workspace.Update(message)
 	}
 	if model.launcherReady && model.surface == surfaceLauncher {
 		return model, model.launcher.Update(message)
@@ -277,6 +338,157 @@ func (model Model) connect(intent launcher.ConnectIntent) tea.Cmd {
 			warning: warning, request: intent.Request,
 		}
 	})
+}
+
+func (model Model) loadSchemas(intent workspace.LoadSchemasIntent) tea.Cmd {
+	catalog := model.catalog
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if catalog == nil {
+			return workspace.SchemasFailed(intent.Meta, catalogUnavailableError())
+		}
+		schemas, err := catalog.Schemas(ctx)
+		if err != nil {
+			return workspace.SchemasFailed(intent.Meta, workspaceOperationError("load schemas", err))
+		}
+		return workspace.SchemasLoadedMsg{Schemas: schemas, Meta: intent.Meta}
+	})
+}
+
+func (model Model) loadRelations(intent workspace.LoadRelationsIntent) tea.Cmd {
+	catalog := model.catalog
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if catalog == nil {
+			return workspace.RelationsFailed(intent.Schema, intent.Meta, catalogUnavailableError())
+		}
+		relations, err := catalog.Relations(ctx, intent.Schema)
+		if err != nil {
+			return workspace.RelationsFailed(intent.Schema, intent.Meta, workspaceOperationError("load relations", err))
+		}
+		return workspace.RelationsLoadedMsg{Schema: intent.Schema, Relations: relations, Meta: intent.Meta}
+	})
+}
+
+func (model Model) checkWorkspaceConnection(intent workspace.CheckConnectionIntent) tea.Cmd {
+	session := model.session
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if session == nil {
+			return workspace.HealthCheckFailed(intent.Meta, core.NewError(
+				"check connection", core.ErrorNetwork, "The PostgreSQL session is no longer available.", true, nil,
+			))
+		}
+		if err := session.Ping(ctx); err != nil {
+			return workspace.HealthCheckFailed(intent.Meta, workspaceOperationError("check connection", err))
+		}
+		return workspace.ConnectionCheckedMsg{Meta: intent.Meta}
+	})
+}
+
+func (model Model) reconnectWorkspace(intent workspace.ReconnectIntent) tea.Cmd {
+	profiles := model.profiles
+	connector := model.connector
+	connected := model.connected
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if profiles == nil || connector == nil || connected.ID == "" {
+			return workspace.ReconnectFailed(intent.Meta, core.NewError(
+				"reconnect", core.ErrorInternal, "The saved connection profile is unavailable.", false, nil,
+			))
+		}
+		draft, err := profiles.Draft(ctx, profile.ID(connected.ID))
+		if err != nil {
+			return workspace.ReconnectFailed(intent.Meta, workspaceOperationError("reconnect", err))
+		}
+		prepared, err := profiles.Prepare(ctx, draft)
+		if err != nil {
+			return workspace.ReconnectFailed(intent.Meta, workspaceOperationError("reconnect", err))
+		}
+		if prepared.CredentialSource == profile.CredentialNone && !draft.ReplacePassword {
+			return workspace.ReconnectFailed(intent.Meta, core.NewError(
+				"reconnect", core.ErrorAuthentication,
+				"No password is available for automatic reconnect. Disconnect and enter it from the launcher.", false, nil,
+			))
+		}
+		session, info, err := connector.Connect(
+			ctx, targetFromProfile(prepared.Profile), launcher.Credential{Password: prepared.Password},
+		)
+		if err != nil {
+			return workspace.ReconnectFailed(intent.Meta, workspaceOperationError("reconnect", err))
+		}
+		return reconnectionSucceededMsg{session: session, info: info, meta: intent.Meta}
+	})
+}
+
+func (model Model) runWorkspace(meta core.RequestMeta, work func(context.Context) tea.Msg) tea.Cmd {
+	registry := model.cancellations
+	ctx, cancel := context.WithCancel(context.Background())
+	registry.Register(meta.Operation, cancel)
+	return func() tea.Msg {
+		defer registry.Forget(meta.Operation)
+		defer cancel()
+		return work(ctx)
+	}
+}
+
+func (model Model) cancelWorkspace(intent workspace.CancelIntent) tea.Cmd {
+	registry := model.cancellations
+	operations := append([]core.OperationID(nil), intent.Operations...)
+	return func() tea.Msg {
+		for _, operation := range operations {
+			registry.Cancel(operation)
+		}
+		return nil
+	}
+}
+
+func (model Model) disconnectWorkspace() (tea.Model, tea.Cmd) {
+	registry := model.cancellations
+	session := model.session
+	model.session = nil
+	model.catalog = nil
+	model.workspaceReady = false
+	model.surface = surfaceLauncher
+	model.warning = nil
+	model.diagnostics.Record(Diagnostic{Operation: "disconnect", Status: "success"})
+	return model, tea.Sequence(
+		func() tea.Msg {
+			registry.CancelAll()
+			if session != nil {
+				session.Close()
+			}
+			return nil
+		},
+		model.launcher.Reload(),
+	)
+}
+
+func catalogFromSession(session launcher.Session) workspace.CatalogReader {
+	if catalog, ok := session.(workspace.CatalogReader); ok {
+		return catalog
+	}
+	return nil
+}
+
+func catalogUnavailableError() *core.Error {
+	return core.NewError(
+		"load catalog", core.ErrorInternal,
+		"This connection does not expose PostgreSQL catalog access.", false, nil,
+	)
+}
+
+func workspaceOperationError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var structured *core.Error
+	if errors.As(err, &structured) {
+		return structured
+	}
+	if errors.Is(err, context.Canceled) {
+		return core.NewError(operation, core.ErrorCancellation, "Operation cancelled. You can run it again.", true, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return core.NewError(operation, core.ErrorTimeout, "PostgreSQL did not respond in time. You can try again.", true, err)
+	}
+	return core.NewError(operation, core.ErrorInternal, "The workspace operation failed.", true, err)
 }
 
 func (model Model) importURL(intent launcher.ImportURLIntent) tea.Cmd {
@@ -404,11 +616,15 @@ func cloneParameters(source map[string]string) map[string]string {
 func (model Model) View() tea.View {
 	content := model.bootstrapView()
 	if model.width > 0 && model.height > 0 && (model.width < 48 || model.height < 12) {
+		preserved := "Launcher state is preserved."
+		if model.surface == surfaceWorkspace && model.workspaceReady {
+			preserved = fmt.Sprintf("Connected to %s / %s; workspace state is preserved.", model.connected.Name, model.connection.Database)
+		}
 		content = strings.Join([]string{
 			model.theme.Title.Render("db-tui"), "",
 			"Terminal is too small for safe editing.",
 			fmt.Sprintf("Need at least 48×12; current size is %d×%d.", model.width, model.height),
-			"Resize to continue. Current state is preserved.", "",
+			"Resize to continue. " + preserved, "",
 			model.theme.Muted.Render("Ctrl+C quit"),
 		}, "\n")
 	} else if model.launcherReady {
@@ -438,16 +654,8 @@ func (model Model) bootstrapView() string {
 }
 
 func (model Model) workspaceView() string {
-	lines := []string{
-		model.theme.Title.Render("db-tui"), "",
-		model.theme.Title.Render(model.connected.Name),
-		fmt.Sprintf("%s / %s • PostgreSQL %s", model.connection.Server, model.connection.Database, model.connection.ServerVersion),
-		"",
-		"Connected workspace shell is ready for the catalog implementation slice.", "",
-		model.theme.Muted.Render("Esc disconnect • q quit"),
+	if !model.workspaceReady {
+		return model.bootstrapView()
 	}
-	if model.warning != nil {
-		lines = append(lines, "", model.warning.Summary)
-	}
-	return strings.Join(lines, "\n")
+	return model.workspace.View(model.theme)
 }

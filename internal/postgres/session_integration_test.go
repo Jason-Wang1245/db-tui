@@ -72,6 +72,31 @@ func TestSessionConnectsToSupportedPostgreSQL(t *testing.T) {
 	if err := session.Ping(ctx); err != nil {
 		t.Fatalf("ping session: %v", err)
 	}
+	if _, err := session.pool.Exec(ctx, `
+		create schema audit;
+		create table public.users (id bigint primary key, email text not null);
+		create view public.active_users as select id, email from public.users;
+		create table audit.events (id bigint primary key);
+	`); err != nil {
+		t.Fatalf("create catalog fixtures: %v", err)
+	}
+	schemas, err := session.Schemas(ctx)
+	if err != nil {
+		t.Fatalf("load schemas: %v", err)
+	}
+	if len(schemas) != 2 || schemas[0].Name != "audit" || schemas[1].Name != "public" {
+		t.Fatalf("schemas = %#v", schemas)
+	}
+	relations, err := session.Relations(ctx, "public")
+	if err != nil {
+		t.Fatalf("load public relations: %v", err)
+	}
+	if len(relations) != 2 || relations[0].Name != "active_users" || relations[1].Name != "users" {
+		t.Fatalf("relations = %#v", relations)
+	}
+	if !relations[0].CanSelect || !relations[1].CanSelect {
+		t.Fatalf("owner privileges = %#v", relations)
+	}
 }
 
 func TestConnectorReportsServerAndClassifiesAuthentication(t *testing.T) {

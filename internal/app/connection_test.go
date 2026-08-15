@@ -11,6 +11,7 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/core"
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
+	"github.com/Jason-Wang1245/db-tui/internal/workspace"
 )
 
 type fakeProfileService struct {
@@ -68,10 +69,27 @@ func (connector *fakeConnector) Connect(context.Context, launcher.ConnectionTarg
 	return connector.session, connector.info, nil
 }
 
-type fakeSession struct{ closes int }
+type fakeSession struct {
+	closes    int
+	pingError error
+	schemas   []workspace.Schema
+	relations map[string][]workspace.Relation
+}
 
-func (*fakeSession) Ping(context.Context) error { return nil }
-func (session *fakeSession) Close()             { session.closes++ }
+func (session *fakeSession) Ping(context.Context) error { return session.pingError }
+func (session *fakeSession) Close()                     { session.closes++ }
+func (session *fakeSession) Schemas(context.Context) ([]workspace.Schema, error) {
+	if session.schemas == nil {
+		return []workspace.Schema{{Name: "public"}}, nil
+	}
+	return session.schemas, nil
+}
+func (session *fakeSession) Relations(_ context.Context, schema string) ([]workspace.Relation, error) {
+	if session.relations == nil {
+		return []workspace.Relation{{Schema: schema, Name: "users", Kind: workspace.RelationTable, CanSelect: true}}, nil
+	}
+	return session.relations[schema], nil
+}
 
 func connectionFixture() (*fakeProfileService, *fakeConnector) {
 	saved := profile.Profile{
@@ -199,5 +217,71 @@ func TestStaleConnectionSuccessIsClosedAndIgnored(t *testing.T) {
 	}
 	if strings.Contains(model.View().Content, "Stale") {
 		t.Fatal("stale connection replaced launcher state")
+	}
+}
+
+func TestConnectedWorkspaceLoadsCatalogOpensTableAndDisconnects(t *testing.T) {
+	service, connector := connectionFixture()
+	model := New(Dependencies{Profiles: service, Connector: connector})
+	model, _ = updateApp(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
+	model = loadLauncher(t, model)
+	model, command := beginQuickConnect(t, model)
+	model, command = updateApp(t, model, command())
+
+	// The workspace init intent is executed by the app against the live session.
+	model, command = updateApp(t, model, command())
+	model, command = updateApp(t, model, command())
+	if view := model.View().Content; !strings.Contains(view, "public") {
+		t.Fatalf("catalog view = %q", view)
+	}
+
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeySpace})
+	model, command = updateApp(t, model, command())
+	model, command = updateApp(t, model, command())
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyDown})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if view := model.View().Content; !strings.Contains(view, "public.users") || !strings.Contains(view, "Table tab ready") {
+		t.Fatalf("table placeholder view = %q", view)
+	}
+
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	model, command = updateApp(t, model, command())
+	if model.surface != surfaceLauncher || model.workspaceReady || model.session != nil {
+		t.Fatalf("disconnect state: surface=%s ready=%v session=%v", model.surface, model.workspaceReady, model.session)
+	}
+}
+
+func TestReconnectReplacesSessionAndPreservesWorkspaceTabs(t *testing.T) {
+	service, connector := connectionFixture()
+	oldSession := connector.session
+	model := loadLauncher(t, New(Dependencies{Profiles: service, Connector: connector}))
+	model, command := beginQuickConnect(t, model)
+	model, command = updateApp(t, model, command())
+
+	// Open an SQL placeholder before the connection is lost.
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyTab})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'n'})
+	tabID := model.workspace.ActiveTab()
+
+	oldSession.pingError = core.NewError(
+		"ping", core.ErrorNetwork, "PostgreSQL closed the connection.", true, nil,
+	)
+	model, command = updateApp(t, model, model.workspace.CheckConnectionNow())
+	model, command = updateApp(t, model, command())
+	model, _ = updateApp(t, model, command())
+	if model.workspace.Connection() != workspace.ConnectionLost {
+		t.Fatalf("connection state = %s", model.workspace.Connection())
+	}
+
+	newSession := &fakeSession{}
+	connector.session = newSession
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'r'})
+	model, command = updateApp(t, model, command())
+	model, _ = updateApp(t, model, command())
+	if model.session != newSession || oldSession.closes != 1 {
+		t.Fatalf("session replacement: current=%p new=%p old closes=%d", model.session, newSession, oldSession.closes)
+	}
+	if model.workspace.Connection() != workspace.ConnectionConnected || len(model.workspace.Tabs()) != 1 || model.workspace.ActiveTab() != tabID {
+		t.Fatalf("workspace after reconnect: state=%s tabs=%#v active=%s", model.workspace.Connection(), model.workspace.Tabs(), model.workspace.ActiveTab())
 	}
 }

@@ -1,8 +1,8 @@
 # db-tui
 
 `db-tui` is a PostgreSQL management terminal UI under active development. It
-currently includes secure local connection-profile management and a PostgreSQL
-connection/test flow.
+currently includes secure connection management and the connected workspace
+shell; table data and SQL execution are the next implementation slices.
 
 ## Requirements
 
@@ -38,8 +38,21 @@ connect, and `d` to delete. In the form, use `Ctrl+U` to import the masked URL,
 `Ctrl+P` to toggle keychain storage, `Ctrl+S` to save, `Ctrl+T` to test, and
 `Ctrl+Enter` to connect. `Esc` cancels active work or discards a draft.
 
-The connected workspace, table browsing, staged CRUD, and SQL tabs are handled
-by subsequent implementation slices.
+The connected workspace provides:
+
+- Lazy, expandable schema/relation navigation with PostgreSQL privilege hints
+- One ordered strip for deduplicated table tabs and session-local SQL tabs
+- Keyboard and mouse parity, contextual help, safe close/leave confirmation,
+  stable status feedback, and responsive wide/drawer/single-pane layouts
+- Connection health checks and explicit reconnect/disconnect behavior that
+  preserves open tabs without replaying edits or SQL
+
+Use `Tab` / `Shift+Tab` to move focus, `Space` to expand schemas, `Enter` to
+open a relation, `[` / `]` to switch tabs, and `n` / `x` on the tab strip to
+create or close tabs. `?` opens contextual help and `Ctrl+D` disconnects.
+
+Table tabs and SQL tabs intentionally show shell placeholders until their
+dedicated browsing/CRUD and execution slices are implemented.
 
 ## Profiles and passwords
 
