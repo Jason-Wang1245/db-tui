@@ -1,8 +1,9 @@
 # db-tui
 
 `db-tui` is a PostgreSQL management terminal UI under active development. It
-currently includes secure connection management and the connected workspace
-shell; table data and SQL execution are the next implementation slices.
+currently includes secure connection management, the connected workspace, and
+paginated table browsing; staged grid CRUD and SQL execution are the next
+implementation slices.
 
 ## Requirements
 
@@ -42,6 +43,10 @@ The connected workspace provides:
 
 - Lazy, expandable schema/relation navigation with PostgreSQL privilege hints
 - One ordered strip for deduplicated table tabs and session-local SQL tabs
+- Typed table metadata and 100-row server-side pages, with deterministic keyset
+  pagination for keyed relations and labelled best-effort browsing otherwise
+- Per-column sorting, refresh, responsive column sizing, horizontal navigation,
+  safe PostgreSQL value formatting, and recoverable detailed database errors
 - Keyboard and mouse parity, contextual help, safe close/leave confirmation,
   stable status feedback, and responsive wide/drawer/single-pane layouts
 - Connection health checks and explicit reconnect/disconnect behavior that
@@ -51,8 +56,14 @@ Use `Tab` / `Shift+Tab` to move focus, `Space` to expand schemas, `Enter` to
 open a relation, `[` / `]` to switch tabs, and `n` / `x` on the tab strip to
 create or close tabs. `?` opens contextual help and `Ctrl+D` disconnects.
 
-Table tabs and SQL tabs intentionally show shell placeholders until their
-dedicated browsing/CRUD and execution slices are implemented.
+In a table grid, use arrows or `h`/`j`/`k`/`l` to move between cells, `n`/`p`
+or Page Down/Page Up to change pages, `s` to cycle the selected column through
+ascending, descending, and default order, and `r` to refresh from page one.
+Clicking selects a cell; the wheel moves by rows and Shift+wheel moves by
+columns. `Ctrl+C` cancels an active load, which can then be rerun normally.
+
+SQL tabs intentionally show a shell placeholder until their execution slice is
+implemented. Table tabs are browse-only until staged CRUD is implemented.
 
 ## Profiles and passwords
 

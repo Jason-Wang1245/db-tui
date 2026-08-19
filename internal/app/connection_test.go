@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Jason-Wang1245/db-tui/internal/core"
+	"github.com/Jason-Wang1245/db-tui/internal/grid"
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
 	"github.com/Jason-Wang1245/db-tui/internal/workspace"
@@ -89,6 +90,36 @@ func (session *fakeSession) Relations(_ context.Context, schema string) ([]works
 		return []workspace.Relation{{Schema: schema, Name: "users", Kind: workspace.RelationTable, CanSelect: true}}, nil
 	}
 	return session.relations[schema], nil
+}
+
+func (*fakeSession) Describe(_ context.Context, relation grid.RelationID) (grid.Relation, error) {
+	return grid.Relation{
+		ID: relation, Kind: grid.RelationTable, Identity: []string{"id"}, IdentityPrimary: true,
+		CanSelect: true, HasXMin: true, ReadOnlyReason: "Browsing only.",
+		Columns: []grid.Column{
+			{Name: "id", DataType: "bigint", TypeOID: 20, CanSelect: true, Sortable: true, IdentityPart: true},
+			{Name: "email", DataType: "text", TypeOID: 25, CanSelect: true, Sortable: true},
+		},
+	}, nil
+}
+
+func (*fakeSession) FetchPage(_ context.Context, _ grid.Relation, request grid.PageRequest) (grid.Page, error) {
+	return grid.Page{Rows: []grid.Row{{
+		Identity: map[string]any{"id": int64(1)}, XMin: 7,
+		Cells: []grid.Cell{{Raw: int64(1), Display: "1"}, {Raw: "a@example.com", Display: "a@example.com"}},
+	}}}, nil
+}
+
+func (session *fakeSession) FetchCurrentRow(ctx context.Context, relation grid.RelationID, _ map[string]any) (grid.Row, error) {
+	described, err := session.Describe(ctx, relation)
+	if err != nil {
+		return grid.Row{}, err
+	}
+	page, err := session.FetchPage(ctx, described, grid.PageRequest{Relation: relation})
+	if err != nil {
+		return grid.Row{}, err
+	}
+	return page.Rows[0], nil
 }
 
 func connectionFixture() (*fakeProfileService, *fakeConnector) {
@@ -239,9 +270,15 @@ func TestConnectedWorkspaceLoadsCatalogOpensTableAndDisconnects(t *testing.T) {
 	model, command = updateApp(t, model, command())
 	model, command = updateApp(t, model, command())
 	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyDown})
-	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if view := model.View().Content; !strings.Contains(view, "public.users") || !strings.Contains(view, "Table tab ready") {
-		t.Fatalf("table placeholder view = %q", view)
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEnter})
+	for step := 0; step < 5; step++ {
+		if command == nil {
+			t.Fatalf("table load stopped at step %d", step)
+		}
+		model, command = updateApp(t, model, command())
+	}
+	if view := model.View().Content; !strings.Contains(view, "public.users") || !strings.Contains(view, "a@example.com") {
+		t.Fatalf("table grid view = %q", view)
 	}
 
 	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})

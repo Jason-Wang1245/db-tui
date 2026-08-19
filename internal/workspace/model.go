@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Jason-Wang1245/db-tui/internal/core"
+	"github.com/Jason-Wang1245/db-tui/internal/ui"
 )
 
 const healthCheckInterval = 10 * time.Second
@@ -99,6 +100,12 @@ type ReconnectIntent struct {
 	Meta core.RequestMeta
 }
 
+type OpenTableIntent struct {
+	Workspace core.WorkspaceID
+	Tab       core.TabID
+	Relation  Relation
+}
+
 type CancelIntent struct {
 	Operations []core.OperationID
 }
@@ -130,6 +137,7 @@ type ReconnectedMsg struct {
 type TabStateChangedMsg struct {
 	Tab       core.TabID
 	Dirty     bool
+	DirtySet  bool
 	Lifecycle TabLifecycle
 	Request   core.RequestMeta
 }
@@ -229,6 +237,58 @@ func (model Model) Tabs() []Tab {
 
 func (model Model) ActiveTab() core.TabID { return model.activeTab }
 
+func (model Model) ActiveTable() (core.TabID, Relation, bool) {
+	index := model.activeTabIndex()
+	if index < 0 || model.tabs[index].Table == nil {
+		return "", Relation{}, false
+	}
+	return model.tabs[index].Envelope.ID, model.tabs[index].Table.Relation, true
+}
+
+func (model Model) ContentRect() ui.Rect {
+	x := 0
+	width := max(0, model.width)
+	if model.layout == LayoutWide {
+		x = workspaceNavigatorWidth(model.width) + 1
+		width = max(0, model.width-x)
+	}
+	return ui.Rect{X: x, Y: 2, Width: width, Height: max(0, model.height-4)}
+}
+
+func (model Model) RoutesToContent(message tea.Msg) bool {
+	if model.connection != ConnectionConnected || model.help || model.modal.Kind != modalNone {
+		return false
+	}
+	if _, _, ok := model.ActiveTable(); !ok {
+		return false
+	}
+	switch message := message.(type) {
+	case tea.KeyPressMsg:
+		if model.focus != FocusContent {
+			return false
+		}
+		switch message.Keystroke() {
+		case "tab", "shift+tab", "[", "]", "?", "q", "ctrl+d", "esc":
+			return false
+		default:
+			return true
+		}
+	case tea.MouseClickMsg:
+		if model.layout != LayoutWide && model.focus == FocusNavigator {
+			return false
+		}
+		mouse := message.Mouse()
+		return model.ContentRect().Contains(mouse.X, mouse.Y)
+	case tea.MouseWheelMsg:
+		if model.layout != LayoutWide && model.focus == FocusNavigator {
+			return false
+		}
+		mouse := message.Mouse()
+		return model.ContentRect().Contains(mouse.X, mouse.Y)
+	}
+	return false
+}
+
 func (model Model) ExpectsReconnect(meta core.RequestMeta) bool {
 	return model.matches(operationReconnect, meta, model.reconnectRequest, "")
 }
@@ -303,7 +363,9 @@ func (model *Model) Update(message tea.Msg) tea.Cmd {
 	case TabStateChangedMsg:
 		for index := range model.tabs {
 			if model.tabs[index].Envelope.ID == message.Tab {
-				model.tabs[index].Envelope.Dirty = message.Dirty
+				if message.DirtySet {
+					model.tabs[index].Envelope.Dirty = message.Dirty
+				}
 				model.tabs[index].Envelope.Lifecycle = message.Lifecycle
 				model.tabs[index].Envelope.ActiveRequest = message.Request
 				break
@@ -433,11 +495,8 @@ func (model *Model) updateFocusedKey(key string) tea.Cmd {
 			}
 		}
 	case FocusContent:
-		if key == "left" || key == "h" {
-			model.moveTab(-1)
-		} else if key == "right" || key == "l" {
-			model.moveTab(1)
-		}
+		// Kind-specific reducers own content navigation. The shell handles only
+		// the global keys above while content is focused.
 	}
 	model.rebuildHitboxes()
 	return nil
@@ -452,8 +511,7 @@ func (model *Model) activateTreeItem() tea.Cmd {
 		return model.toggleSchema(item.Schema)
 	}
 	relation := model.schemas[item.Schema].Relations[item.Relation]
-	model.openTableTab(relation)
-	return nil
+	return model.openTableTab(relation)
 }
 
 func (model *Model) expandSelected() tea.Cmd {
@@ -617,7 +675,7 @@ func ReconnectFailed(meta core.RequestMeta, err error) OperationFailedMsg {
 	return OperationFailedMsg{Kind: operationReconnect, Err: err, Meta: meta}
 }
 
-func (model *Model) openTableTab(relation Relation) {
+func (model *Model) openTableTab(relation Relation) tea.Cmd {
 	for _, tab := range model.tabs {
 		if tab.Table != nil && tab.Table.Relation.Schema == relation.Schema && tab.Table.Relation.Name == relation.Name {
 			model.activeTab = tab.Envelope.ID
@@ -627,7 +685,7 @@ func (model *Model) openTableTab(relation Relation) {
 			}
 			model.status = "Focused existing table tab."
 			model.rebuildHitboxes()
-			return
+			return nil
 		}
 	}
 	id := core.TabID(fmt.Sprintf("table-%d", model.nextTab))
@@ -641,6 +699,8 @@ func (model *Model) openTableTab(relation Relation) {
 	model.focus = FocusContent
 	model.status = "Opened " + relation.Schema + "." + relation.Name + "."
 	model.rebuildHitboxes()
+	intent := OpenTableIntent{Workspace: model.id, Tab: id, Relation: relation}
+	return func() tea.Msg { return intent }
 }
 
 func (model *Model) openSQLTab() {

@@ -34,10 +34,10 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 - [Bootstrap the project and CI](bootstrap-the-project-and-ci.md) — Established the pinned Go 1.26 modular-monolith skeleton, executable and service seams, layered tests, PostgreSQL Testcontainers matrix, native smoke workflow, and verified four-target release snapshots.
 - [Implement secure connection management](implement-secure-connection-management.md) — Added the responsive profile launcher, safe URL import and validation, atomic non-secret persistence, UUID-keyed keychain/session password lifecycle, cancellable PostgreSQL testing, and sanitized actionable connection errors.
 - [Implement the connected workspace shell](implement-the-connected-workspace-shell.md) — Added lazy schema/relation navigation, responsive root-owned focus and mouse behavior, safe mixed-tab lifecycle, health-aware reconnect/disconnect, and PostgreSQL catalog/privilege discovery.
+- [Implement paginated table browsing](implement-paginated-table-browsing.md) — Added typed grid tabs with safe PostgreSQL metadata/value handling, deterministic keyset paging, labelled best-effort keyless paging, responsive keyboard/mouse navigation, and recoverable cancellable loads.
 
 ## Not yet specified
 
-- Edge cases exposed by real PostgreSQL schemas and data types after the first end-to-end browsing slice exists.
 - Recovery behavior that only becomes concrete after connection, query, cancellation, and mutation paths are integrated.
 - Release hardening discovered by testing packaged binaries on representative macOS and Linux environments.
 

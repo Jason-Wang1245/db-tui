@@ -77,3 +77,20 @@ func TestClassifyErrorSanitizesPostgreSQLDetails(t *testing.T) {
 		t.Fatalf("hint length = %d", len([]rune(classified.PostgreSQL.Hint)))
 	}
 }
+
+func TestClassifyErrorShowsPostgreSQLBrowseMessage(t *testing.T) {
+	classified := ClassifyError("fetch table page", &pgconn.PgError{
+		Code: "22P02", Message: "invalid input syntax for type integer",
+	})
+	if !strings.Contains(classified.Summary, "invalid input syntax for type integer") ||
+		!strings.Contains(classified.Summary, "SQLSTATE 22P02") {
+		t.Fatalf("browse summary = %q", classified.Summary)
+	}
+
+	permission := ClassifyError("fetch table page", &pgconn.PgError{
+		Code: "42501", Message: "permission denied for table users",
+	})
+	if permission.Category != core.ErrorPermission || !strings.Contains(permission.Summary, "permission denied for table users") {
+		t.Fatalf("permission browse error = %#v", permission)
+	}
+}

@@ -113,7 +113,7 @@ func ClassifyError(operation string, err error) *core.Error {
 		return nil
 	}
 	if errors.Is(err, context.Canceled) {
-		return core.NewError(operation, core.ErrorCancellation, "Connection attempt cancelled.", true, err)
+		return core.NewError(operation, core.ErrorCancellation, operationLabel(operation)+" cancelled.", true, err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return core.NewError(operation, core.ErrorTimeout, "PostgreSQL did not respond within 10 seconds. Check the host, port, VPN, and firewall.", true, err)
@@ -153,9 +153,12 @@ func classifyPostgreSQLError(operation string, err *pgconn.PgError, cause error)
 		Context:    sanitizeServerText(err.Where),
 	}
 	category := core.ErrorValidation
-	summary := "PostgreSQL rejected the connection."
-	if details.SQLState != "" {
-		summary = fmt.Sprintf("PostgreSQL rejected the connection (SQLSTATE %s).", details.SQLState)
+	summary := "PostgreSQL rejected " + operationLabel(operation) + "."
+	if message := sanitizeServerText(err.Message); message != "" && !isConnectionOperation(operation) {
+		summary = "PostgreSQL: " + strings.TrimSuffix(message, ".") + "."
+	}
+	if details.SQLState != "" && !strings.Contains(summary, "SQLSTATE") {
+		summary = strings.TrimSuffix(summary, ".") + fmt.Sprintf(" (SQLSTATE %s).", details.SQLState)
 	}
 	retryable := false
 	switch {
@@ -166,7 +169,9 @@ func classifyPostgreSQLError(operation string, err *pgconn.PgError, cause error)
 		summary = "The database does not exist. Check the database name."
 	case err.Code == "42501":
 		category = core.ErrorPermission
-		summary = "The user does not have permission to connect to this database."
+		if isConnectionOperation(operation) {
+			summary = "The user does not have permission to connect to this database."
+		}
 	case strings.HasPrefix(err.Code, "08"):
 		category = core.ErrorNetwork
 		summary = "PostgreSQL closed the connection. Check server availability and network access."
@@ -175,6 +180,22 @@ func classifyPostgreSQLError(operation string, err *pgconn.PgError, cause error)
 	classified := core.NewError(operation, category, summary, retryable, cause)
 	classified.PostgreSQL = details
 	return classified
+}
+
+func isConnectionOperation(operation string) bool {
+	switch operation {
+	case "configure connection", "connect", "inspect connection", "ping":
+		return true
+	default:
+		return false
+	}
+}
+
+func operationLabel(operation string) string {
+	if isConnectionOperation(operation) {
+		return "connection attempt"
+	}
+	return operation
 }
 
 func sanitizeSQLState(value string) string {

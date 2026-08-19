@@ -59,14 +59,21 @@ func TestOpeningTableDeduplicatesAndRestoresContentFocus(t *testing.T) {
 	model := workspaceFixture(t)
 	loadPublicRelations(t, &model)
 	model.moveTree(1)
-	model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	intent, ok := command().(OpenTableIntent)
+	if !ok || intent.Tab == "" || intent.Relation.Name != "orders" || intent.Workspace != model.id {
+		t.Fatalf("open table intent = %#v", intent)
+	}
 	if len(model.tabs) != 1 || model.tabs[0].Table.Relation.Name != "orders" || model.focus != FocusContent {
 		t.Fatalf("opened state: tabs=%#v focus=%s", model.tabs, model.focus)
 	}
 	model.focus = FocusNavigator
-	model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	command = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if len(model.tabs) != 1 || model.focus != FocusContent {
 		t.Fatalf("duplicate open created tabs=%d focus=%s", len(model.tabs), model.focus)
+	}
+	if command != nil {
+		t.Fatal("duplicate open emitted another load intent")
 	}
 }
 
@@ -233,7 +240,7 @@ func TestDirtyTabCloseDefaultsToKeepOpenAndRequiresExplicitDiscard(t *testing.T)
 	model.focus = FocusTabs
 	model.Update(tea.KeyPressMsg{Code: 'n'})
 	tabID := model.activeTab
-	model.Update(TabStateChangedMsg{Tab: tabID, Dirty: true, Lifecycle: TabIdle})
+	model.Update(TabStateChangedMsg{Tab: tabID, Dirty: true, DirtySet: true, Lifecycle: TabIdle})
 	model.focus = FocusTabs
 	model.Update(tea.KeyPressMsg{Code: 'x'})
 	if model.modal.Kind != modalCloseTab || model.modal.Destructive {
@@ -277,7 +284,7 @@ func TestDirtyWorkspaceQuitUsesOneSafeSummaryModal(t *testing.T) {
 	model := workspaceFixture(t)
 	model.focus = FocusTabs
 	model.Update(tea.KeyPressMsg{Code: 'n'})
-	model.Update(TabStateChangedMsg{Tab: model.activeTab, Dirty: true, Lifecycle: TabIdle})
+	model.Update(TabStateChangedMsg{Tab: model.activeTab, Dirty: true, DirtySet: true, Lifecycle: TabIdle})
 	model.Update(tea.KeyPressMsg{Code: 'q'})
 	if model.modal.Kind != modalQuit || !strings.Contains(model.View(ui.DefaultTheme()), "Dirty or running tabs") {
 		t.Fatalf("quit modal = %#v view=%q", model.modal, model.View(ui.DefaultTheme()))

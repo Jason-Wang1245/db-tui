@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Jason-Wang1245/db-tui/internal/core"
+	"github.com/Jason-Wang1245/db-tui/internal/grid"
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
 	"github.com/Jason-Wang1245/db-tui/internal/ui"
@@ -57,6 +58,8 @@ type Model struct {
 	workspace      workspace.Model
 	workspaceReady bool
 	catalog        workspace.CatalogReader
+	browser        grid.TableBrowser
+	tables         map[core.TabID]grid.Model
 	nextWorkspace  uint64
 }
 
@@ -91,6 +94,7 @@ func New(deps Dependencies) Model {
 		cancellations: cancellations,
 		surface:       surfaceLauncher,
 		nextWorkspace: 1,
+		tables:        make(map[core.TabID]grid.Model),
 	}
 	if deps.Profiles != nil && deps.Connector != nil {
 		model.launcher = launcher.NewModel()
@@ -117,6 +121,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if model.workspaceReady {
 			model.workspace.SetSize(message.Width, message.Height)
+			model.resizeTables()
 		}
 		return model, nil
 	case launcher.LoadProfilesIntent:
@@ -143,12 +148,26 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, model.checkWorkspaceConnection(message)
 	case workspace.ReconnectIntent:
 		return model, model.reconnectWorkspace(message)
+	case workspace.OpenTableIntent:
+		return model.openTable(message)
 	case workspace.CancelIntent:
 		return model, model.cancelWorkspace(message)
 	case workspace.DisconnectIntent:
 		return model.disconnectWorkspace()
 	case workspace.QuitIntent:
 		return model, model.shutdownCommand()
+	case grid.DescribeIntent:
+		return model, model.describeTable(message)
+	case grid.LoadPageIntent:
+		return model, model.loadTablePage(message)
+	case grid.CancelIntent:
+		return model, model.cancelTable(message)
+	case grid.RelationDescribedMsg:
+		return model.updateTable(message.Meta.Tab, message)
+	case grid.PageLoadedMsg:
+		return model.updateTable(message.Meta.Tab, message)
+	case grid.OperationFailedMsg:
+		return model.updateTable(message.Meta.Tab, message)
 	case connectionSucceededMsg:
 		if !model.launcher.Expects(launcher.ActionConnect, message.request) {
 			message.session.Close()
@@ -172,6 +191,8 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.warning = message.warning
 		model.surface = surfaceWorkspace
 		model.catalog = catalog
+		model.browser = browserFromSession(message.session)
+		model.tables = make(map[core.TabID]grid.Model)
 		workspaceID := core.WorkspaceID(fmt.Sprintf("workspace-%d", model.nextWorkspace))
 		model.nextWorkspace++
 		model.workspace = workspace.NewModel(
@@ -198,25 +219,37 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		model.session = message.session
 		model.catalog = catalog
+		model.browser = browserFromSession(message.session)
 		model.connection = message.info
 		model.diagnostics.Record(Diagnostic{Operation: "reconnect", Status: "success"})
 		return model, model.workspace.Update(workspace.ReconnectedMsg{Meta: message.meta})
 	case tea.KeyPressMsg:
 		if message.Keystroke() == "ctrl+c" {
 			if model.surface == surfaceWorkspace && model.workspaceReady {
-				return model, model.workspace.Update(message)
+				if model.workspace.RoutesToContent(message) {
+					if table, ok := model.activeTable(); ok && table.Busy() {
+						return model.routeToTable(message)
+					}
+				}
+				return model.updateWorkspace(message)
 			}
 			return model, model.shutdownCommand()
 		}
 		if model.surface == surfaceWorkspace {
-			return model, model.workspace.Update(message)
+			if model.workspace.RoutesToContent(message) {
+				return model.routeToTable(message)
+			}
+			return model.updateWorkspace(message)
 		}
 		if model.launcherReady && message.Keystroke() == "q" && model.launcher.CanQuit() {
 			return model, model.shutdownCommand()
 		}
 	}
 	if model.workspaceReady && model.surface == surfaceWorkspace {
-		return model, model.workspace.Update(message)
+		if model.workspace.RoutesToContent(message) {
+			return model.routeToTable(message)
+		}
+		return model.updateWorkspace(message)
 	}
 	if model.launcherReady && model.surface == surfaceLauncher {
 		return model, model.launcher.Update(message)
@@ -368,6 +401,185 @@ func (model Model) loadRelations(intent workspace.LoadRelationsIntent) tea.Cmd {
 	})
 }
 
+func (model Model) openTable(intent workspace.OpenTableIntent) (tea.Model, tea.Cmd) {
+	if !model.workspaceReady || intent.Workspace != model.workspace.ID() {
+		return model, nil
+	}
+	if _, exists := model.tables[intent.Tab]; exists {
+		return model, nil
+	}
+	table := grid.NewModel(intent.Workspace, intent.Tab, grid.RelationID{
+		Schema: intent.Relation.Schema,
+		Name:   intent.Relation.Name,
+	})
+	rect := model.workspace.ContentRect()
+	table.SetSize(rect.Width, rect.Height)
+	command := table.Init()
+	model.tables[intent.Tab] = table
+	model.syncTableState(intent.Tab, table)
+	return model, command
+}
+
+func (model Model) describeTable(intent grid.DescribeIntent) tea.Cmd {
+	browser := model.browser
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if browser == nil {
+			return grid.DescribeFailed(intent.Meta, browserUnavailableError())
+		}
+		relation, err := browser.Describe(ctx, intent.Relation)
+		if err != nil {
+			return grid.DescribeFailed(intent.Meta, workspaceOperationError("describe relation", err))
+		}
+		return grid.RelationDescribedMsg{Relation: relation, Meta: intent.Meta}
+	})
+}
+
+func (model Model) loadTablePage(intent grid.LoadPageIntent) tea.Cmd {
+	browser := model.browser
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if browser == nil {
+			return grid.PageFailed(intent.Meta, browserUnavailableError())
+		}
+		page, err := browser.FetchPage(ctx, intent.Relation, intent.Page)
+		if err != nil {
+			return grid.PageFailed(intent.Meta, workspaceOperationError("fetch table page", err))
+		}
+		return grid.PageLoadedMsg{Page: page, Meta: intent.Meta}
+	})
+}
+
+func (model Model) cancelTable(intent grid.CancelIntent) tea.Cmd {
+	registry := model.cancellations
+	return func() tea.Msg {
+		registry.Cancel(intent.Operation)
+		return nil
+	}
+}
+
+func (model Model) updateTable(tab core.TabID, message tea.Msg) (tea.Model, tea.Cmd) {
+	table, ok := model.tables[tab]
+	if !ok {
+		return model, nil
+	}
+	command := table.Update(message)
+	model.tables[tab] = table
+	model.syncTableState(tab, table)
+	return model, command
+}
+
+func (model Model) routeToTable(message tea.Msg) (tea.Model, tea.Cmd) {
+	tab, _, ok := model.workspace.ActiveTable()
+	if !ok {
+		return model.updateWorkspace(message)
+	}
+	table, ok := model.tables[tab]
+	if !ok {
+		return model.updateWorkspace(message)
+	}
+	var workspaceCommand tea.Cmd
+	gridMessage := message
+	switch message := message.(type) {
+	case tea.MouseClickMsg:
+		workspaceCommand = model.workspace.Update(message)
+		mouse := message.Mouse()
+		rect := model.workspace.ContentRect()
+		mouse.X -= rect.X
+		mouse.Y -= rect.Y
+		gridMessage = tea.MouseClickMsg(mouse)
+	case tea.MouseWheelMsg:
+		mouse := message.Mouse()
+		rect := model.workspace.ContentRect()
+		mouse.X -= rect.X
+		mouse.Y -= rect.Y
+		gridMessage = tea.MouseWheelMsg(mouse)
+	}
+	tableCommand := table.Update(gridMessage)
+	model.tables[tab] = table
+	model.syncTableState(tab, table)
+	return model, combineCommands(workspaceCommand, tableCommand)
+}
+
+func (model Model) updateWorkspace(message tea.Msg) (tea.Model, tea.Cmd) {
+	command := model.workspace.Update(message)
+	model.reconcileTables()
+	return model, command
+}
+
+func (model *Model) resizeTables() {
+	rect := model.workspace.ContentRect()
+	for tab, table := range model.tables {
+		table.SetSize(rect.Width, rect.Height)
+		model.tables[tab] = table
+	}
+}
+
+func (model Model) activeTable() (grid.Model, bool) {
+	tab, _, ok := model.workspace.ActiveTable()
+	if !ok {
+		return grid.Model{}, false
+	}
+	table, ok := model.tables[tab]
+	return table, ok
+}
+
+func (model *Model) syncTableState(tab core.TabID, table grid.Model) {
+	lifecycle := workspace.TabIdle
+	switch table.Lifecycle() {
+	case grid.LifecycleRunning:
+		lifecycle = workspace.TabRunning
+	case grid.LifecycleFailed:
+		lifecycle = workspace.TabFailed
+	}
+	model.workspace.Update(workspace.TabStateChangedMsg{
+		Tab: tab, Lifecycle: lifecycle, Request: table.ActiveMeta(),
+	})
+}
+
+func (model *Model) reconcileTables() {
+	open := make(map[core.TabID]bool)
+	for _, tab := range model.workspace.Tabs() {
+		if tab.Envelope.Kind == workspace.TabTable {
+			open[tab.Envelope.ID] = true
+		}
+	}
+	for tab := range model.tables {
+		if !open[tab] {
+			delete(model.tables, tab)
+		}
+	}
+}
+
+func combineCommands(commands ...tea.Cmd) tea.Cmd {
+	filtered := make([]tea.Cmd, 0, len(commands))
+	for _, command := range commands {
+		if command != nil {
+			filtered = append(filtered, command)
+		}
+	}
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
+	default:
+		return tea.Batch(filtered...)
+	}
+}
+
+func browserFromSession(session launcher.Session) grid.TableBrowser {
+	if browser, ok := session.(grid.TableBrowser); ok {
+		return browser
+	}
+	return nil
+}
+
+func browserUnavailableError() *core.Error {
+	return core.NewError(
+		"browse table", core.ErrorInternal,
+		"This connection does not expose PostgreSQL table browsing.", false, nil,
+	)
+}
+
 func (model Model) checkWorkspaceConnection(intent workspace.CheckConnectionIntent) tea.Cmd {
 	session := model.session
 	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
@@ -444,6 +656,8 @@ func (model Model) disconnectWorkspace() (tea.Model, tea.Cmd) {
 	session := model.session
 	model.session = nil
 	model.catalog = nil
+	model.browser = nil
+	model.tables = make(map[core.TabID]grid.Model)
 	model.workspaceReady = false
 	model.surface = surfaceLauncher
 	model.warning = nil
@@ -657,5 +871,10 @@ func (model Model) workspaceView() string {
 	if !model.workspaceReady {
 		return model.bootstrapView()
 	}
-	return model.workspace.View(model.theme)
+	content := workspace.ContentView{}
+	if table, ok := model.activeTable(); ok {
+		view := table.View(model.theme)
+		content = workspace.ContentView{Lines: view.Lines, Hints: view.Hints, Status: view.Status}
+	}
+	return model.workspace.ViewWithContent(model.theme, content)
 }

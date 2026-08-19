@@ -8,7 +8,21 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/ui"
 )
 
+type ContentView struct {
+	Lines  []string
+	Hints  string
+	Status string
+}
+
 func (model Model) View(theme ui.Theme) string {
+	return model.view(theme, ContentView{})
+}
+
+func (model Model) ViewWithContent(theme ui.Theme, content ContentView) string {
+	return model.view(theme, content)
+}
+
+func (model Model) view(theme ui.Theme, content ContentView) string {
 	if model.modal.Kind != modalNone {
 		return model.modalView(theme)
 	}
@@ -40,7 +54,7 @@ func (model Model) View(theme ui.Theme) string {
 
 	bodyHeight := max(0, height-4)
 	navigatorLines := model.navigatorLines(navigatorWidth, bodyHeight)
-	contentLines := model.contentLines(contentWidth, bodyHeight, theme)
+	contentLines := model.contentLines(contentWidth, bodyHeight, theme, content)
 	for row := 0; row < bodyHeight; row++ {
 		left := ""
 		right := contentLines[row]
@@ -52,8 +66,8 @@ func (model Model) View(theme ui.Theme) string {
 		lines[row+2] = composeColumns(left, right, navigatorWidth, contentWidth, model.layout == LayoutWide)
 	}
 	if height >= 2 {
-		lines[height-2] = fit(model.hints(), width)
-		lines[height-1] = fit(model.statusLine(theme), width)
+		lines[height-2] = fit(model.hints(content), width)
+		lines[height-1] = fit(model.statusLine(theme, content), width)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -273,7 +287,7 @@ func navigatorLinesForWidth(model Model, width, height int) []string {
 	return lines
 }
 
-func (model Model) contentLines(width, height int, theme ui.Theme) []string {
+func (model Model) contentLines(width, height int, theme ui.Theme, content ContentView) []string {
 	lines := make([]string, height)
 	if height == 0 {
 		return lines
@@ -304,6 +318,12 @@ func (model Model) contentLines(width, height int, theme ui.Theme) []string {
 		focus = "> "
 	}
 	if tab.Table != nil {
+		if content.Lines != nil {
+			for index := 0; index < height && index < len(content.Lines); index++ {
+				lines[index] = fit(content.Lines[index], width)
+			}
+			return lines
+		}
 		relation := tab.Table.Relation
 		lines[0] = fit(focus+theme.Title.Render(relation.Schema+"."+relation.Name), width)
 		if height > 1 {
@@ -349,9 +369,12 @@ func (model Model) appendError(lines []string, width, start int) {
 	}
 }
 
-func (model Model) hints() string {
+func (model Model) hints(content ContentView) string {
 	if model.connection != ConnectionConnected {
 		return "r reconnect · d disconnect · ? help · q quit"
+	}
+	if model.focus == FocusContent && content.Hints != "" {
+		return content.Hints
 	}
 	if model.layout == LayoutSingle {
 		switch model.focus {
@@ -373,8 +396,11 @@ func (model Model) hints() string {
 	}
 }
 
-func (model Model) statusLine(theme ui.Theme) string {
+func (model Model) statusLine(theme ui.Theme, content ContentView) string {
 	status := model.status
+	if model.focus == FocusContent && content.Status != "" {
+		status = content.Status
+	}
 	if status == "" {
 		status = "Ready"
 	}

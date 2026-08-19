@@ -1,4 +1,4 @@
-// Package grid owns record browsing and staged mutation state.
+// Package grid owns deterministic record browsing and staged mutation state.
 package grid
 
 import (
@@ -7,9 +7,46 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/core"
 )
 
+const DefaultPageSize = 100
+
 type RelationID struct {
 	Schema string
 	Name   string
+}
+
+type RelationKind string
+
+const (
+	RelationTable            RelationKind = "table"
+	RelationPartitionedTable RelationKind = "partitioned_table"
+	RelationView             RelationKind = "view"
+	RelationMaterializedView RelationKind = "materialized_view"
+	RelationForeignTable     RelationKind = "foreign_table"
+)
+
+type Column struct {
+	Name         string
+	DataType     string
+	TypeOID      uint32
+	Nullable     bool
+	HasDefault   bool
+	Generated    bool
+	Identity     bool
+	CanSelect    bool
+	Sortable     bool
+	IdentityPart bool
+}
+
+type Relation struct {
+	ID              RelationID
+	Kind            RelationKind
+	Columns         []Column
+	Identity        []string
+	IdentityPrimary bool
+	CanSelect       bool
+	HasXMin         bool
+	BestEffort      bool
+	ReadOnlyReason  string
 }
 
 type Sort struct {
@@ -17,11 +54,20 @@ type Sort struct {
 	Ascending bool
 }
 
+type PageDirection string
+
+const (
+	PageFirst    PageDirection = "first"
+	PageNext     PageDirection = "next"
+	PagePrevious PageDirection = "previous"
+)
+
 type PageRequest struct {
-	Relation RelationID
-	Cursor   string
-	Sort     Sort
-	Limit    int
+	Relation  RelationID
+	Cursor    string
+	Direction PageDirection
+	Sort      Sort
+	Limit     int
 }
 
 type Cell struct {
@@ -44,7 +90,8 @@ type Page struct {
 }
 
 type TableBrowser interface {
-	FetchPage(context.Context, PageRequest) (Page, error)
+	Describe(context.Context, RelationID) (Relation, error)
+	FetchPage(context.Context, Relation, PageRequest) (Page, error)
 	FetchCurrentRow(context.Context, RelationID, map[string]any) (Row, error)
 }
 
