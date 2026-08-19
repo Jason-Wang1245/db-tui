@@ -12,6 +12,7 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/grid"
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
+	"github.com/Jason-Wang1245/db-tui/internal/sqltab"
 	"github.com/Jason-Wang1245/db-tui/internal/workspace"
 )
 
@@ -75,6 +76,9 @@ type fakeSession struct {
 	pingError error
 	schemas   []workspace.Schema
 	relations map[string][]workspace.Relation
+	sqlResult sqltab.RunResult
+	sqlError  error
+	sqlRuns   []sqltab.RunRequest
 }
 
 func (session *fakeSession) Ping(context.Context) error { return session.pingError }
@@ -120,6 +124,23 @@ func (session *fakeSession) FetchCurrentRow(ctx context.Context, relation grid.R
 		return grid.Row{}, err
 	}
 	return page.Rows[0], nil
+}
+
+func (session *fakeSession) Execute(_ context.Context, request sqltab.RunRequest) (sqltab.RunResult, error) {
+	session.sqlRuns = append(session.sqlRuns, request)
+	if session.sqlError != nil {
+		return session.sqlResult, session.sqlError
+	}
+	if len(session.sqlResult.Outputs) > 0 {
+		return session.sqlResult, nil
+	}
+	return sqltab.RunResult{Outputs: []sqltab.Output{{
+		Kind:    sqltab.OutputRows,
+		Columns: []sqltab.Column{{Name: "answer", DataType: "integer", TypeOID: 23}},
+		Rows: [][]sqltab.Cell{
+			{{Raw: int32(42), Display: "42", Full: "42"}},
+		},
+	}}}, nil
 }
 
 func connectionFixture() (*fakeProfileService, *fakeConnector) {
@@ -288,6 +309,59 @@ func TestConnectedWorkspaceLoadsCatalogOpensTableAndDisconnects(t *testing.T) {
 	}
 }
 
+func TestConnectedWorkspaceRunsIndependentDirtySQLTabs(t *testing.T) {
+	service, connector := connectionFixture()
+	model := New(Dependencies{Profiles: service, Connector: connector})
+	model, _ = updateApp(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
+	model = loadLauncher(t, model)
+	model, command := beginQuickConnect(t, model)
+	model, _ = updateApp(t, model, command())
+
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyTab})
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	model, _ = updateApp(t, model, command())
+	firstTab := model.workspace.ActiveTab()
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 's', Text: "select 42"})
+	state := model.sqlTabs[firstTab]
+	if state.Buffer() != "select 42" || !model.workspace.Tabs()[0].Envelope.Dirty {
+		t.Fatalf("SQL editor state=%q tabs=%#v", state.Buffer(), model.workspace.Tabs())
+	}
+	// A confirmation opened by a mouse/global action owns input even if the SQL
+	// editor was still in text mode.
+	model.workspace.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if model.sqlTabs[firstTab].Buffer() != "select 42" {
+		t.Fatal("confirmation input leaked into the SQL editor")
+	}
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEsc})
+
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyF5})
+	model, command = updateApp(t, model, command())
+	model, _ = updateApp(t, model, command())
+	if len(connector.session.sqlRuns) != 1 || connector.session.sqlRuns[0].Snapshot != "select 42" {
+		t.Fatalf("SQL runs = %#v", connector.session.sqlRuns)
+	}
+	if view := model.View().Content; !strings.Contains(view, "answer") || !strings.Contains(view, "42") {
+		t.Fatalf("SQL result view = %q", view)
+	}
+
+	// The completed run focuses results. Esc returns to the tab strip, where a
+	// second independent SQL tab can be opened.
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEsc})
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	model, _ = updateApp(t, model, command())
+	secondTab := model.workspace.ActiveTab()
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'q', Text: "query two"})
+	if secondTab == firstTab || model.sqlTabs[secondTab].Buffer() != "query two" {
+		t.Fatalf("second SQL tab=%s state=%q", secondTab, model.sqlTabs[secondTab].Buffer())
+	}
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEsc})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: '['})
+	if model.workspace.ActiveTab() != firstTab || model.sqlTabs[firstTab].Buffer() != "select 42" {
+		t.Fatalf("first SQL tab was not preserved: active=%s buffer=%q", model.workspace.ActiveTab(), model.sqlTabs[firstTab].Buffer())
+	}
+}
+
 func TestReconnectReplacesSessionAndPreservesWorkspaceTabs(t *testing.T) {
 	service, connector := connectionFixture()
 	oldSession := connector.session
@@ -295,10 +369,12 @@ func TestReconnectReplacesSessionAndPreservesWorkspaceTabs(t *testing.T) {
 	model, command := beginQuickConnect(t, model)
 	model, command = updateApp(t, model, command())
 
-	// Open an SQL placeholder before the connection is lost.
+	// Open and edit SQL before the connection is lost.
 	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyTab})
-	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'n'})
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'n'})
+	model, _ = updateApp(t, model, command())
 	tabID := model.workspace.ActiveTab()
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 's', Text: "select 1"})
 
 	oldSession.pingError = core.NewError(
 		"ping", core.ErrorNetwork, "PostgreSQL closed the connection.", true, nil,
@@ -320,5 +396,8 @@ func TestReconnectReplacesSessionAndPreservesWorkspaceTabs(t *testing.T) {
 	}
 	if model.workspace.Connection() != workspace.ConnectionConnected || len(model.workspace.Tabs()) != 1 || model.workspace.ActiveTab() != tabID {
 		t.Fatalf("workspace after reconnect: state=%s tabs=%#v active=%s", model.workspace.Connection(), model.workspace.Tabs(), model.workspace.ActiveTab())
+	}
+	if model.executor != newSession || model.sqlTabs[tabID].Buffer() != "select 1" {
+		t.Fatalf("SQL reconnect state: executor=%T buffer=%q", model.executor, model.sqlTabs[tabID].Buffer())
 	}
 }

@@ -35,6 +35,7 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 - [Implement secure connection management](implement-secure-connection-management.md) — Added the responsive profile launcher, safe URL import and validation, atomic non-secret persistence, UUID-keyed keychain/session password lifecycle, cancellable PostgreSQL testing, and sanitized actionable connection errors.
 - [Implement the connected workspace shell](implement-the-connected-workspace-shell.md) — Added lazy schema/relation navigation, responsive root-owned focus and mouse behavior, safe mixed-tab lifecycle, health-aware reconnect/disconnect, and PostgreSQL catalog/privilege discovery.
 - [Implement paginated table browsing](implement-paginated-table-browsing.md) — Added typed grid tabs with safe PostgreSQL metadata/value handling, deterministic keyset paging, labelled best-effort keyless paging, responsive keyboard/mouse navigation, and recoverable cancellable loads.
+- [Implement the SQL tab workspace](implement-the-sql-tab-workspace.md) — Added independent multiline SQL tabs with immutable batch execution, isolated cancellable sessions, bounded ordered results, structured PostgreSQL errors, and safe session-local lifecycle handling.
 
 ## Not yet specified
 

@@ -106,6 +106,12 @@ type OpenTableIntent struct {
 	Relation  Relation
 }
 
+type OpenSQLIntent struct {
+	Workspace core.WorkspaceID
+	Tab       core.TabID
+	Title     string
+}
+
 type CancelIntent struct {
 	Operations []core.OperationID
 }
@@ -245,6 +251,14 @@ func (model Model) ActiveTable() (core.TabID, Relation, bool) {
 	return model.tabs[index].Envelope.ID, model.tabs[index].Table.Relation, true
 }
 
+func (model Model) ActiveSQL() (core.TabID, string, bool) {
+	index := model.activeTabIndex()
+	if index < 0 || model.tabs[index].SQL == nil {
+		return "", "", false
+	}
+	return model.tabs[index].Envelope.ID, model.tabs[index].Envelope.Title, true
+}
+
 func (model Model) ContentRect() ui.Rect {
 	x := 0
 	width := max(0, model.width)
@@ -255,11 +269,12 @@ func (model Model) ContentRect() ui.Rect {
 	return ui.Rect{X: x, Y: 2, Width: width, Height: max(0, model.height-4)}
 }
 
+func (model Model) AllowsContentInput() bool {
+	return model.connection == ConnectionConnected && !model.help && model.modal.Kind == modalNone && model.activeTabIndex() >= 0
+}
+
 func (model Model) RoutesToContent(message tea.Msg) bool {
-	if model.connection != ConnectionConnected || model.help || model.modal.Kind != modalNone {
-		return false
-	}
-	if _, _, ok := model.ActiveTable(); !ok {
+	if !model.AllowsContentInput() {
 		return false
 	}
 	switch message := message.(type) {
@@ -283,6 +298,12 @@ func (model Model) RoutesToContent(message tea.Msg) bool {
 		if model.layout != LayoutWide && model.focus == FocusNavigator {
 			return false
 		}
+		mouse := message.Mouse()
+		return model.ContentRect().Contains(mouse.X, mouse.Y)
+	case tea.MouseMotionMsg:
+		mouse := message.Mouse()
+		return model.ContentRect().Contains(mouse.X, mouse.Y)
+	case tea.MouseReleaseMsg:
 		mouse := message.Mouse()
 		return model.ContentRect().Contains(mouse.X, mouse.Y)
 	}
@@ -485,7 +506,7 @@ func (model *Model) updateFocusedKey(key string) tea.Cmd {
 		case "right", "l":
 			model.moveTab(1)
 		case "n":
-			model.openSQLTab()
+			return model.openSQLTab()
 		case "x":
 			return model.closeActiveTab()
 		case "enter":
@@ -703,7 +724,7 @@ func (model *Model) openTableTab(relation Relation) tea.Cmd {
 	return func() tea.Msg { return intent }
 }
 
-func (model *Model) openSQLTab() {
+func (model *Model) openSQLTab() tea.Cmd {
 	label := fmt.Sprintf("SQL %d", model.nextSQL)
 	model.nextSQL++
 	id := core.TabID(fmt.Sprintf("sql-%d", model.nextTab))
@@ -716,6 +737,8 @@ func (model *Model) openSQLTab() {
 	model.focus = FocusContent
 	model.status = "Opened " + label + "."
 	model.rebuildHitboxes()
+	intent := OpenSQLIntent{Workspace: model.id, Tab: id, Title: label}
+	return func() tea.Msg { return intent }
 }
 
 func (model *Model) closeActiveTab() tea.Cmd {

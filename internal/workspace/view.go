@@ -9,9 +9,10 @@ import (
 )
 
 type ContentView struct {
-	Lines  []string
-	Hints  string
-	Status string
+	Lines              []string
+	Hints              string
+	Status             string
+	ConsumesGlobalKeys bool
 }
 
 func (model Model) View(theme ui.Theme) string {
@@ -84,19 +85,27 @@ func (model Model) modalView(theme ui.Theme) string {
 	lines := make([]string, height)
 	title := "Leave workspace?"
 	body := "Dirty or running tabs will be discarded and active operations cancelled."
-	destructive := "Discard and leave"
+	destructive := model.modalDestructiveLabel()
 	if model.modal.Kind == modalCloseTab {
 		title = "Close tab?"
-		destructive = "Discard and close"
 		for _, tab := range model.tabs {
 			if tab.Envelope.ID == model.modal.Tab {
 				body = tab.Envelope.Title + " has local changes or running work."
+				if tab.Envelope.Kind == TabSQL {
+					switch {
+					case tab.Envelope.Lifecycle == TabRunning && tab.Envelope.Dirty:
+						body = tab.Envelope.Title + " has SQL and a running query."
+					case tab.Envelope.Lifecycle == TabRunning:
+						body = tab.Envelope.Title + " has a running query."
+					case tab.Envelope.Dirty:
+						body = tab.Envelope.Title + " contains session-local SQL."
+					}
+				}
 				break
 			}
 		}
 	} else if model.modal.Kind == modalQuit {
 		title = "Quit db-tui?"
-		destructive = "Discard and quit"
 	}
 	top := max(0, height/2-3)
 	if top < height {
@@ -121,6 +130,35 @@ func (model Model) modalView(theme ui.Theme) string {
 		lines[index] = fit(lines[index], width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (model Model) modalDestructiveLabel() string {
+	switch model.modal.Kind {
+	case modalQuit:
+		return "Discard and quit"
+	case modalDisconnect:
+		return "Discard and leave"
+	case modalCloseTab:
+		for _, tab := range model.tabs {
+			if tab.Envelope.ID != model.modal.Tab {
+				continue
+			}
+			if tab.Envelope.Kind == TabSQL {
+				switch {
+				case tab.Envelope.Lifecycle == TabRunning && tab.Envelope.Dirty:
+					return "Cancel run and discard SQL"
+				case tab.Envelope.Lifecycle == TabRunning:
+					return "Cancel run and close"
+				case tab.Envelope.Dirty:
+					return "Discard SQL"
+				}
+			}
+			break
+		}
+		return "Discard and close"
+	default:
+		return "Discard"
+	}
 }
 
 func (model Model) header(theme ui.Theme) string {
@@ -317,13 +355,13 @@ func (model Model) contentLines(width, height int, theme ui.Theme, content Conte
 	if model.focus == FocusContent {
 		focus = "> "
 	}
-	if tab.Table != nil {
-		if content.Lines != nil {
-			for index := 0; index < height && index < len(content.Lines); index++ {
-				lines[index] = fit(content.Lines[index], width)
-			}
-			return lines
+	if content.Lines != nil {
+		for index := 0; index < height && index < len(content.Lines); index++ {
+			lines[index] = fit(content.Lines[index], width)
 		}
+		return lines
+	}
+	if tab.Table != nil {
 		relation := tab.Table.Relation
 		lines[0] = fit(focus+theme.Title.Render(relation.Schema+"."+relation.Name), width)
 		if height > 1 {
@@ -407,7 +445,11 @@ func (model Model) statusLine(theme ui.Theme, content ContentView) string {
 	if model.warning != nil {
 		status += " · " + model.warning.Summary
 	}
-	return theme.Muted.Render(status + "                                      ? help · Ctrl+D disconnect · q quit")
+	suffix := "? help · Ctrl+D disconnect · q quit"
+	if content.ConsumesGlobalKeys && model.focus == FocusContent {
+		suffix = "Esc navigation mode for workspace shortcuts"
+	}
+	return theme.Muted.Render(status + "                                      " + suffix)
 }
 
 func (model Model) helpView(theme ui.Theme) string {
@@ -419,6 +461,9 @@ func (model Model) helpView(theme ui.Theme) string {
 		"Space               expand/collapse a schema",
 		"[ / ]               previous/next workspace tab",
 		"n / x               new SQL / close tab (tab strip)",
+		"SQL: F5 / F6 / F7   execute / run all / rerun",
+		"SQL: Shift+arrows   select text; Esc leaves editor mode",
+		"SQL results         n/p page; {/} output; Enter inspect; c copy",
 		"r                   refresh objects; reconnect when offline",
 		"Ctrl+C              cancel active work; quit when idle",
 		"Ctrl+D              disconnect",

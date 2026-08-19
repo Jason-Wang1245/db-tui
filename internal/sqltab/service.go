@@ -3,10 +3,15 @@ package sqltab
 
 import (
 	"context"
-
-	"charm.land/bubbles/v2/textarea"
+	"time"
 
 	"github.com/Jason-Wang1245/db-tui/internal/core"
+)
+
+const (
+	ResultPageSize       = 100
+	MaxRowsPerResult     = 10_000
+	MaxCapturedDataBytes = 64 << 20
 )
 
 type OutputKind string
@@ -22,35 +27,47 @@ type RunRequest struct {
 	Snapshot string
 }
 
+type Column struct {
+	Name     string
+	DataType string
+	TypeOID  uint32
+}
+
+type Cell struct {
+	Raw     any
+	Display string
+	Full    string
+	Null    bool
+}
+
+type Notice struct {
+	Severity string
+	Message  string
+	SQLState string
+	Detail   string
+	Hint     string
+}
+
 type Output struct {
 	Kind         OutputKind
 	CommandTag   string
 	AffectedRows int64
-	Columns      []string
-	Rows         [][]any
+	Columns      []Column
+	Rows         [][]Cell
 	Truncated    bool
 	Incomplete   bool
+	Duration     time.Duration
+	Error        *core.Error
 }
 
 type RunResult struct {
-	Outputs []Output
+	Outputs       []Output
+	Notices       []Notice
+	Duration      time.Duration
+	CapturedBytes int64
+	Warning       string
 }
 
 type SQLExecutor interface {
 	Execute(context.Context, RunRequest) (RunResult, error)
-}
-
-type State struct {
-	Editor   textarea.Model
-	LastRun  RunRequest
-	Result   RunResult
-	Running  bool
-	LastMeta core.RequestMeta
-}
-
-func NewState() State {
-	editor := textarea.New()
-	editor.SetWidth(80)
-	editor.SetHeight(10)
-	return State{Editor: editor}
 }

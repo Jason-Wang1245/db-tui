@@ -20,6 +20,7 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/core"
 	"github.com/Jason-Wang1245/db-tui/internal/grid"
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
+	"github.com/Jason-Wang1245/db-tui/internal/sqltab"
 )
 
 type integrationClock struct{}
@@ -207,6 +208,67 @@ func TestSessionConnectsToSupportedPostgreSQL(t *testing.T) {
 	}
 	if view.HasXMin || !view.BestEffort || view.Kind != grid.RelationView {
 		t.Fatalf("view metadata = %#v", view)
+	}
+
+	batch, err := session.Execute(ctx, sqltab.RunRequest{Snapshot: `
+		do $$ begin raise notice 'ordered notice'; end $$;
+		select 1::integer as n, null::text as missing, ''::text as empty;
+		update public.users set active = false where id = 1;
+		select nonexistent_column;
+		select 99;
+	`})
+	if err != nil {
+		t.Fatalf("execute ordered SQL batch: %v", err)
+	}
+	if len(batch.Outputs) != 4 || batch.Outputs[0].Kind != sqltab.OutputCommand ||
+		batch.Outputs[1].Kind != sqltab.OutputRows || batch.Outputs[2].CommandTag != "UPDATE 1" ||
+		batch.Outputs[3].Kind != sqltab.OutputError {
+		t.Fatalf("ordered SQL outputs = %#v", batch.Outputs)
+	}
+	row := batch.Outputs[1].Rows[0]
+	if row[0].Display != "1" || !row[1].Null || row[2].Null || row[2].Full != "" {
+		t.Fatalf("SQL row NULL/empty values = %#v", row)
+	}
+	if len(batch.Notices) != 1 || batch.Notices[0].Message != "ordered notice" {
+		t.Fatalf("SQL notices = %#v", batch.Notices)
+	}
+	if batch.Outputs[3].Error == nil || batch.Outputs[3].Error.PostgreSQL == nil ||
+		batch.Outputs[3].Error.PostgreSQL.SQLState != "42703" || batch.Outputs[3].Error.PostgreSQL.Position == 0 {
+		t.Fatalf("SQL error output = %#v", batch.Outputs[3])
+	}
+
+	openTransaction, err := session.Execute(ctx, sqltab.RunRequest{Snapshot: `
+		begin;
+		create temp table run_local (id integer);
+		insert into run_local values (1);
+	`})
+	if err != nil || !strings.Contains(openTransaction.Warning, "rolled it back") {
+		t.Fatalf("open transaction cleanup result=%#v err=%v", openTransaction, err)
+	}
+	isolation, err := session.Execute(ctx, sqltab.RunRequest{Snapshot: `select to_regclass('pg_temp.run_local')`})
+	if err != nil || len(isolation.Outputs) != 1 || !isolation.Outputs[0].Rows[0][0].Null {
+		t.Fatalf("isolated follow-up result=%#v err=%v", isolation, err)
+	}
+
+	bounded, err := session.Execute(ctx, sqltab.RunRequest{Snapshot: `select value from generate_series(1, 10005) value`})
+	if err != nil || len(bounded.Outputs) != 1 || len(bounded.Outputs[0].Rows) != sqltab.MaxRowsPerResult || !bounded.Outputs[0].Truncated {
+		t.Fatalf("bounded SQL result rows=%d output=%#v err=%v", len(bounded.Outputs[0].Rows), bounded.Outputs[0], err)
+	}
+
+	cancelContext, cancelRun := context.WithCancel(ctx)
+	cancelled := make(chan error, 1)
+	go func() {
+		_, runErr := session.Execute(cancelContext, sqltab.RunRequest{Snapshot: `select pg_sleep(10)`})
+		cancelled <- runErr
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancelRun()
+	var cancelError *core.Error
+	if err := <-cancelled; !errors.As(err, &cancelError) || cancelError.Category != core.ErrorCancellation {
+		t.Fatalf("cancelled SQL error = %#v", err)
+	}
+	if err := session.Ping(ctx); err != nil {
+		t.Fatalf("pool did not recover after SQL cancellation: %v", err)
 	}
 }
 

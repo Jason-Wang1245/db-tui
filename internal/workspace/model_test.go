@@ -260,6 +260,36 @@ func TestDirtyTabCloseDefaultsToKeepOpenAndRequiresExplicitDiscard(t *testing.T)
 	}
 }
 
+func TestOpeningSQLTabEmitsRootIntentAndRoutesItsContent(t *testing.T) {
+	model := workspaceFixture(t)
+	model.focus = FocusTabs
+	command := model.Update(tea.KeyPressMsg{Code: 'n'})
+	intent, ok := command().(OpenSQLIntent)
+	if !ok || intent.Workspace != model.id || intent.Tab != model.activeTab || intent.Title != "SQL 1" {
+		t.Fatalf("open SQL intent = %#v", intent)
+	}
+	model.focus = FocusContent
+	if !model.RoutesToContent(tea.KeyPressMsg{Code: tea.KeyDown}) {
+		t.Fatal("active SQL content did not receive navigation")
+	}
+}
+
+func TestRunningDirtySQLCloseUsesSpecificSafeLanguage(t *testing.T) {
+	model := workspaceFixture(t)
+	model.focus = FocusTabs
+	model.Update(tea.KeyPressMsg{Code: 'n'})
+	model.Update(TabStateChangedMsg{
+		Tab: model.activeTab, Dirty: true, DirtySet: true, Lifecycle: TabRunning,
+		Request: core.RequestMeta{Workspace: model.id, Tab: model.activeTab, Operation: "sql.run.1", Request: 1},
+	})
+	model.focus = FocusTabs
+	model.Update(tea.KeyPressMsg{Code: 'x'})
+	view := model.View(ui.DefaultTheme())
+	if !strings.Contains(view, "Cancel run and discard SQL") || !strings.Contains(view, "has SQL and a running query") {
+		t.Fatalf("SQL close modal = %q", view)
+	}
+}
+
 func TestClosingRunningTabCancelsItsOperation(t *testing.T) {
 	model := workspaceFixture(t)
 	model.focus = FocusTabs
@@ -292,6 +322,25 @@ func TestDirtyWorkspaceQuitUsesOneSafeSummaryModal(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if model.modal.Kind != modalNone || len(model.tabs) != 1 {
 		t.Fatalf("Esc did not keep work: modal=%#v tabs=%d", model.modal, len(model.tabs))
+	}
+}
+
+func TestContentInputIsSuspendedByHelpAndConfirmationModals(t *testing.T) {
+	model := workspaceFixture(t)
+	model.focus = FocusTabs
+	model.Update(tea.KeyPressMsg{Code: 'n'})
+	model.focus = FocusContent
+	if !model.AllowsContentInput() {
+		t.Fatal("connected active content should accept input")
+	}
+	model.help = true
+	if model.AllowsContentInput() {
+		t.Fatal("help left content input enabled")
+	}
+	model.help = false
+	model.modal = modalState{Kind: modalDisconnect}
+	if model.AllowsContentInput() {
+		t.Fatal("confirmation modal left content input enabled")
 	}
 }
 

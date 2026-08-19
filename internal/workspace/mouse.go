@@ -34,7 +34,7 @@ func (model *Model) rebuildHitboxes() {
 		return
 	}
 	if model.modal.Kind != modalNone {
-		safe, destructive := modalHitboxes(model.width, model.height)
+		safe, destructive := modalHitboxes(model.width, model.height, model.modalDestructiveLabel())
 		model.hitboxes = append(model.hitboxes,
 			Hitbox{Rect: safe, Kind: HitboxModalSafe},
 			Hitbox{Rect: destructive, Kind: HitboxModalApply},
@@ -125,7 +125,7 @@ func (model *Model) updateMouse(mouse tea.Mouse) tea.Cmd {
 			}
 		case HitboxNewSQL:
 			model.focus = FocusTabs
-			model.openSQLTab()
+			return model.openSQLTab()
 		case HitboxContent:
 			if model.activeTab != "" {
 				model.focus = FocusContent
@@ -151,11 +151,13 @@ func (model *Model) updateMouse(mouse tea.Mouse) tea.Cmd {
 	return nil
 }
 
-func modalHitboxes(width, height int) (ui.Rect, ui.Rect) {
+func modalHitboxes(width, height int, destructiveLabel string) (ui.Rect, ui.Rect) {
 	y := min(max(0, height-1), max(0, height/2-3)+4)
-	totalWidth := 33
+	safeWidth := len("[Keep open]")
+	destructiveWidth := len(destructiveLabel) + 2
+	totalWidth := safeWidth + 2 + destructiveWidth
 	x := max(0, (width-totalWidth)/2)
-	return ui.Rect{X: x, Y: y, Width: 12, Height: 1}, ui.Rect{X: x + 13, Y: y, Width: 20, Height: 1}
+	return ui.Rect{X: x, Y: y, Width: safeWidth, Height: 1}, ui.Rect{X: x + safeWidth + 2, Y: y, Width: destructiveWidth, Height: 1}
 }
 
 func (model *Model) updateWheel(mouse tea.Mouse) tea.Cmd {

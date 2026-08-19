@@ -13,6 +13,7 @@ import (
 	"github.com/Jason-Wang1245/db-tui/internal/grid"
 	"github.com/Jason-Wang1245/db-tui/internal/launcher"
 	"github.com/Jason-Wang1245/db-tui/internal/profile"
+	"github.com/Jason-Wang1245/db-tui/internal/sqltab"
 	"github.com/Jason-Wang1245/db-tui/internal/ui"
 	"github.com/Jason-Wang1245/db-tui/internal/workspace"
 )
@@ -60,6 +61,8 @@ type Model struct {
 	catalog        workspace.CatalogReader
 	browser        grid.TableBrowser
 	tables         map[core.TabID]grid.Model
+	executor       sqltab.SQLExecutor
+	sqlTabs        map[core.TabID]sqltab.Model
 	nextWorkspace  uint64
 }
 
@@ -95,6 +98,7 @@ func New(deps Dependencies) Model {
 		surface:       surfaceLauncher,
 		nextWorkspace: 1,
 		tables:        make(map[core.TabID]grid.Model),
+		sqlTabs:       make(map[core.TabID]sqltab.Model),
 	}
 	if deps.Profiles != nil && deps.Connector != nil {
 		model.launcher = launcher.NewModel()
@@ -121,7 +125,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if model.workspaceReady {
 			model.workspace.SetSize(message.Width, message.Height)
-			model.resizeTables()
+			model.resizeContentModels()
 		}
 		return model, nil
 	case launcher.LoadProfilesIntent:
@@ -150,6 +154,8 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, model.reconnectWorkspace(message)
 	case workspace.OpenTableIntent:
 		return model.openTable(message)
+	case workspace.OpenSQLIntent:
+		return model.openSQL(message)
 	case workspace.CancelIntent:
 		return model, model.cancelWorkspace(message)
 	case workspace.DisconnectIntent:
@@ -168,6 +174,16 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model.updateTable(message.Meta.Tab, message)
 	case grid.OperationFailedMsg:
 		return model.updateTable(message.Meta.Tab, message)
+	case sqltab.ExecuteIntent:
+		return model, model.executeSQL(message)
+	case sqltab.CancelIntent:
+		return model, model.cancelSQL(message)
+	case sqltab.LeaveContentIntent:
+		return model.updateWorkspace(tea.KeyPressMsg{Code: tea.KeyEsc})
+	case sqltab.RunCompletedMsg:
+		return model.updateSQL(message.Meta.Tab, message)
+	case sqltab.RunFailedMsg:
+		return model.updateSQL(message.Meta.Tab, message)
 	case connectionSucceededMsg:
 		if !model.launcher.Expects(launcher.ActionConnect, message.request) {
 			message.session.Close()
@@ -192,7 +208,9 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.surface = surfaceWorkspace
 		model.catalog = catalog
 		model.browser = browserFromSession(message.session)
+		model.executor = executorFromSession(message.session)
 		model.tables = make(map[core.TabID]grid.Model)
+		model.sqlTabs = make(map[core.TabID]sqltab.Model)
 		workspaceID := core.WorkspaceID(fmt.Sprintf("workspace-%d", model.nextWorkspace))
 		model.nextWorkspace++
 		model.workspace = workspace.NewModel(
@@ -220,12 +238,16 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.session = message.session
 		model.catalog = catalog
 		model.browser = browserFromSession(message.session)
+		model.executor = executorFromSession(message.session)
 		model.connection = message.info
 		model.diagnostics.Record(Diagnostic{Operation: "reconnect", Status: "success"})
 		return model, model.workspace.Update(workspace.ReconnectedMsg{Meta: message.meta})
 	case tea.KeyPressMsg:
-		if message.Keystroke() == "ctrl+c" {
-			if model.surface == surfaceWorkspace && model.workspaceReady {
+		if model.surface == surfaceWorkspace && model.workspaceReady {
+			if model.activeSQLCaptures(message) {
+				return model.routeToSQL(message)
+			}
+			if message.Keystroke() == "ctrl+c" {
 				if model.workspace.RoutesToContent(message) {
 					if table, ok := model.activeTable(); ok && table.Busy() {
 						return model.routeToTable(message)
@@ -233,21 +255,24 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return model.updateWorkspace(message)
 			}
-			return model, model.shutdownCommand()
-		}
-		if model.surface == surfaceWorkspace {
 			if model.workspace.RoutesToContent(message) {
-				return model.routeToTable(message)
+				return model.routeToActiveContent(message)
 			}
 			return model.updateWorkspace(message)
+		}
+		if message.Keystroke() == "ctrl+c" {
+			return model, model.shutdownCommand()
 		}
 		if model.launcherReady && message.Keystroke() == "q" && model.launcher.CanQuit() {
 			return model, model.shutdownCommand()
 		}
 	}
 	if model.workspaceReady && model.surface == surfaceWorkspace {
+		if model.activeSQLCaptures(message) {
+			return model.routeToSQL(message)
+		}
 		if model.workspace.RoutesToContent(message) {
-			return model.routeToTable(message)
+			return model.routeToActiveContent(message)
 		}
 		return model.updateWorkspace(message)
 	}
@@ -420,6 +445,22 @@ func (model Model) openTable(intent workspace.OpenTableIntent) (tea.Model, tea.C
 	return model, command
 }
 
+func (model Model) openSQL(intent workspace.OpenSQLIntent) (tea.Model, tea.Cmd) {
+	if !model.workspaceReady || intent.Workspace != model.workspace.ID() {
+		return model, nil
+	}
+	if _, exists := model.sqlTabs[intent.Tab]; exists {
+		return model, nil
+	}
+	tab := sqltab.NewModel(intent.Workspace, intent.Tab, intent.Title)
+	rect := model.workspace.ContentRect()
+	tab.SetSize(rect.Width, rect.Height)
+	command := tab.Init()
+	model.sqlTabs[intent.Tab] = tab
+	model.syncSQLState(intent.Tab, tab)
+	return model, command
+}
+
 func (model Model) describeTable(intent grid.DescribeIntent) tea.Cmd {
 	browser := model.browser
 	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
@@ -456,6 +497,32 @@ func (model Model) cancelTable(intent grid.CancelIntent) tea.Cmd {
 	}
 }
 
+func (model Model) executeSQL(intent sqltab.ExecuteIntent) tea.Cmd {
+	executor := model.executor
+	return model.runWorkspace(intent.Request.Meta, func(ctx context.Context) tea.Msg {
+		if executor == nil {
+			return sqltab.RunFailedMsg{
+				Err: executorUnavailableError(), Meta: intent.Request.Meta,
+			}
+		}
+		result, err := executor.Execute(ctx, intent.Request)
+		if err != nil {
+			return sqltab.RunFailedMsg{
+				Partial: result, Err: workspaceOperationError("execute SQL", err), Meta: intent.Request.Meta,
+			}
+		}
+		return sqltab.RunCompletedMsg{Result: result, Meta: intent.Request.Meta}
+	})
+}
+
+func (model Model) cancelSQL(intent sqltab.CancelIntent) tea.Cmd {
+	registry := model.cancellations
+	return func() tea.Msg {
+		registry.Cancel(intent.Operation)
+		return nil
+	}
+}
+
 func (model Model) updateTable(tab core.TabID, message tea.Msg) (tea.Model, tea.Cmd) {
 	table, ok := model.tables[tab]
 	if !ok {
@@ -465,6 +532,24 @@ func (model Model) updateTable(tab core.TabID, message tea.Msg) (tea.Model, tea.
 	model.tables[tab] = table
 	model.syncTableState(tab, table)
 	return model, command
+}
+
+func (model Model) updateSQL(tab core.TabID, message tea.Msg) (tea.Model, tea.Cmd) {
+	state, ok := model.sqlTabs[tab]
+	if !ok {
+		return model, nil
+	}
+	command := state.Update(message)
+	model.sqlTabs[tab] = state
+	model.syncSQLState(tab, state)
+	return model, command
+}
+
+func (model Model) routeToActiveContent(message tea.Msg) (tea.Model, tea.Cmd) {
+	if _, _, ok := model.workspace.ActiveSQL(); ok {
+		return model.routeToSQL(message)
+	}
+	return model.routeToTable(message)
 }
 
 func (model Model) routeToTable(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -499,17 +584,67 @@ func (model Model) routeToTable(message tea.Msg) (tea.Model, tea.Cmd) {
 	return model, combineCommands(workspaceCommand, tableCommand)
 }
 
+func (model Model) routeToSQL(message tea.Msg) (tea.Model, tea.Cmd) {
+	tab, _, ok := model.workspace.ActiveSQL()
+	if !ok {
+		return model.updateWorkspace(message)
+	}
+	state, ok := model.sqlTabs[tab]
+	if !ok {
+		return model.updateWorkspace(message)
+	}
+	var workspaceCommand tea.Cmd
+	localMessage := message
+	switch message := message.(type) {
+	case tea.MouseClickMsg:
+		workspaceCommand = model.workspace.Update(message)
+		mouse := localMouse(message.Mouse(), model.workspace.ContentRect())
+		localMessage = tea.MouseClickMsg(mouse)
+	case tea.MouseMotionMsg:
+		mouse := localMouse(message.Mouse(), model.workspace.ContentRect())
+		localMessage = tea.MouseMotionMsg(mouse)
+	case tea.MouseReleaseMsg:
+		mouse := localMouse(message.Mouse(), model.workspace.ContentRect())
+		localMessage = tea.MouseReleaseMsg(mouse)
+	case tea.MouseWheelMsg:
+		mouse := localMouse(message.Mouse(), model.workspace.ContentRect())
+		localMessage = tea.MouseWheelMsg(mouse)
+	}
+	command := state.Update(localMessage)
+	model.sqlTabs[tab] = state
+	model.syncSQLState(tab, state)
+	return model, combineCommands(workspaceCommand, command)
+}
+
+func localMouse(mouse tea.Mouse, rect ui.Rect) tea.Mouse {
+	mouse.X -= rect.X
+	mouse.Y -= rect.Y
+	return mouse
+}
+
 func (model Model) updateWorkspace(message tea.Msg) (tea.Model, tea.Cmd) {
+	previousTab := model.workspace.ActiveTab()
 	command := model.workspace.Update(message)
-	model.reconcileTables()
+	model.reconcileContentModels()
+	if active := model.workspace.ActiveTab(); active != previousTab {
+		if state, ok := model.sqlTabs[active]; ok {
+			state.Visit()
+			model.sqlTabs[active] = state
+			model.syncSQLState(active, state)
+		}
+	}
 	return model, command
 }
 
-func (model *Model) resizeTables() {
+func (model *Model) resizeContentModels() {
 	rect := model.workspace.ContentRect()
 	for tab, table := range model.tables {
 		table.SetSize(rect.Width, rect.Height)
 		model.tables[tab] = table
+	}
+	for tab, state := range model.sqlTabs {
+		state.SetSize(rect.Width, rect.Height)
+		model.sqlTabs[tab] = state
 	}
 }
 
@@ -520,6 +655,43 @@ func (model Model) activeTable() (grid.Model, bool) {
 	}
 	table, ok := model.tables[tab]
 	return table, ok
+}
+
+func (model Model) activeSQL() (sqltab.Model, bool) {
+	tab, _, ok := model.workspace.ActiveSQL()
+	if !ok {
+		return sqltab.Model{}, false
+	}
+	state, ok := model.sqlTabs[tab]
+	return state, ok
+}
+
+func (model Model) activeSQLCaptures(message tea.Msg) bool {
+	if !model.workspace.AllowsContentInput() {
+		return false
+	}
+	state, ok := model.activeSQL()
+	if !ok || !state.Captures(message) {
+		return false
+	}
+	switch message := message.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg:
+		return model.workspace.Focus() == workspace.FocusContent
+	case tea.MouseClickMsg:
+		mouse := message.Mouse()
+		return model.workspace.ContentRect().Contains(mouse.X, mouse.Y)
+	case tea.MouseMotionMsg:
+		mouse := message.Mouse()
+		return state.Dragging() || model.workspace.ContentRect().Contains(mouse.X, mouse.Y)
+	case tea.MouseReleaseMsg:
+		mouse := message.Mouse()
+		return state.Dragging() || model.workspace.ContentRect().Contains(mouse.X, mouse.Y)
+	case tea.MouseWheelMsg:
+		mouse := message.Mouse()
+		return model.workspace.ContentRect().Contains(mouse.X, mouse.Y)
+	default:
+		return false
+	}
 }
 
 func (model *Model) syncTableState(tab core.TabID, table grid.Model) {
@@ -535,16 +707,39 @@ func (model *Model) syncTableState(tab core.TabID, table grid.Model) {
 	})
 }
 
-func (model *Model) reconcileTables() {
-	open := make(map[core.TabID]bool)
+func (model *Model) syncSQLState(tab core.TabID, state sqltab.Model) {
+	lifecycle := workspace.TabIdle
+	switch state.Lifecycle() {
+	case sqltab.LifecycleRunning:
+		lifecycle = workspace.TabRunning
+	case sqltab.LifecycleFailed:
+		lifecycle = workspace.TabFailed
+	}
+	model.workspace.Update(workspace.TabStateChangedMsg{
+		Tab: tab, Dirty: state.Dirty(), DirtySet: true,
+		Lifecycle: lifecycle, Request: state.ActiveMeta(),
+	})
+}
+
+func (model *Model) reconcileContentModels() {
+	openTables := make(map[core.TabID]bool)
+	openSQL := make(map[core.TabID]bool)
 	for _, tab := range model.workspace.Tabs() {
-		if tab.Envelope.Kind == workspace.TabTable {
-			open[tab.Envelope.ID] = true
+		switch tab.Envelope.Kind {
+		case workspace.TabTable:
+			openTables[tab.Envelope.ID] = true
+		case workspace.TabSQL:
+			openSQL[tab.Envelope.ID] = true
 		}
 	}
 	for tab := range model.tables {
-		if !open[tab] {
+		if !openTables[tab] {
 			delete(model.tables, tab)
+		}
+	}
+	for tab := range model.sqlTabs {
+		if !openSQL[tab] {
+			delete(model.sqlTabs, tab)
 		}
 	}
 }
@@ -573,10 +768,24 @@ func browserFromSession(session launcher.Session) grid.TableBrowser {
 	return nil
 }
 
+func executorFromSession(session launcher.Session) sqltab.SQLExecutor {
+	if executor, ok := session.(sqltab.SQLExecutor); ok {
+		return executor
+	}
+	return nil
+}
+
 func browserUnavailableError() *core.Error {
 	return core.NewError(
 		"browse table", core.ErrorInternal,
 		"This connection does not expose PostgreSQL table browsing.", false, nil,
+	)
+}
+
+func executorUnavailableError() *core.Error {
+	return core.NewError(
+		"execute SQL", core.ErrorInternal,
+		"This connection does not expose PostgreSQL SQL execution.", false, nil,
 	)
 }
 
@@ -657,7 +866,9 @@ func (model Model) disconnectWorkspace() (tea.Model, tea.Cmd) {
 	model.session = nil
 	model.catalog = nil
 	model.browser = nil
+	model.executor = nil
 	model.tables = make(map[core.TabID]grid.Model)
+	model.sqlTabs = make(map[core.TabID]sqltab.Model)
 	model.workspaceReady = false
 	model.surface = surfaceLauncher
 	model.warning = nil
@@ -875,6 +1086,12 @@ func (model Model) workspaceView() string {
 	if table, ok := model.activeTable(); ok {
 		view := table.View(model.theme)
 		content = workspace.ContentView{Lines: view.Lines, Hints: view.Hints, Status: view.Status}
+	} else if state, ok := model.activeSQL(); ok {
+		view := state.View(model.theme)
+		content = workspace.ContentView{
+			Lines: view.Lines, Hints: view.Hints, Status: view.Status,
+			ConsumesGlobalKeys: state.Editing(),
+		}
 	}
 	return model.workspace.ViewWithContent(model.theme, content)
 }
