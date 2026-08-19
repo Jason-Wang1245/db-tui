@@ -36,10 +36,10 @@ Ship a polished PostgreSQL management TUI built with the Bubble Tea stack: secur
 - [Implement the connected workspace shell](implement-the-connected-workspace-shell.md) — Added lazy schema/relation navigation, responsive root-owned focus and mouse behavior, safe mixed-tab lifecycle, health-aware reconnect/disconnect, and PostgreSQL catalog/privilege discovery.
 - [Implement paginated table browsing](implement-paginated-table-browsing.md) — Added typed grid tabs with safe PostgreSQL metadata/value handling, deterministic keyset paging, labelled best-effort keyless paging, responsive keyboard/mouse navigation, and recoverable cancellable loads.
 - [Implement the SQL tab workspace](implement-the-sql-tab-workspace.md) — Added independent multiline SQL tabs with immutable batch execution, isolated cancellable sessions, bounded ordered results, structured PostgreSQL errors, and safe session-local lifecycle handling.
+- [Implement staged grid CRUD](implement-staged-grid-crud.md) — Added per-tab insert/update/delete staging, explicit empty/NULL/default values, atomic parameterized applies, `xmin` conflict diagnostics, generated-value reloads, and safe dirty lifecycle handling.
 
 ## Not yet specified
 
-- Recovery behavior that only becomes concrete after connection, query, cancellation, and mutation paths are integrated.
 - Release hardening discovered by testing packaged binaries on representative macOS and Linux environments.
 
 ## Out of scope

@@ -3,8 +3,6 @@ package grid
 
 import (
 	"context"
-
-	"github.com/Jason-Wang1245/db-tui/internal/core"
 )
 
 const DefaultPageSize = 100
@@ -33,6 +31,8 @@ type Column struct {
 	Generated    bool
 	Identity     bool
 	CanSelect    bool
+	CanInsert    bool
+	CanUpdate    bool
 	Sortable     bool
 	IdentityPart bool
 }
@@ -41,12 +41,19 @@ type Relation struct {
 	ID              RelationID
 	Kind            RelationKind
 	Columns         []Column
+	MutationColumns []Column
 	Identity        []string
 	IdentityPrimary bool
 	CanSelect       bool
+	CanInsert       bool
+	CanUpdate       bool
+	CanDelete       bool
 	HasXMin         bool
 	BestEffort      bool
 	ReadOnlyReason  string
+	InsertReason    string
+	UpdateReason    string
+	DeleteReason    string
 }
 
 type Sort struct {
@@ -73,6 +80,7 @@ type PageRequest struct {
 type Cell struct {
 	Raw     any
 	Display string
+	Edit    string
 	Null    bool
 }
 
@@ -103,15 +111,28 @@ const (
 	MutationDelete MutationKind = "delete"
 )
 
+type ValueKind string
+
+const (
+	ValueText    ValueKind = "text"
+	ValueNull    ValueKind = "null"
+	ValueDefault ValueKind = "default"
+)
+
+type StagedValue struct {
+	Kind ValueKind
+	Text string
+}
+
 type Mutation struct {
 	Kind     MutationKind
+	DraftID  uint64
 	Original Row
-	Staged   Row
-	Request  core.RequestMeta
+	Values   map[string]StagedValue
 }
 
 type ApplyRequest struct {
-	Relation  RelationID
+	Relation  Relation
 	Mutations []Mutation
 }
 
@@ -123,4 +144,43 @@ type ApplyResult struct {
 
 type MutationApplier interface {
 	Apply(context.Context, ApplyRequest) (ApplyResult, error)
+}
+
+type MutationError struct {
+	Mutation int
+	Column   string
+	Current  *Row
+	Err      error
+}
+
+type ApplyUncertainError struct {
+	Err error
+}
+
+func (err *ApplyUncertainError) Error() string {
+	if err == nil || err.Err == nil {
+		return "apply commit outcome is uncertain"
+	}
+	return err.Err.Error()
+}
+
+func (err *ApplyUncertainError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
+}
+
+func (err *MutationError) Error() string {
+	if err == nil || err.Err == nil {
+		return "mutation failed"
+	}
+	return err.Err.Error()
+}
+
+func (err *MutationError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
 }

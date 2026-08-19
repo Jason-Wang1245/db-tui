@@ -290,6 +290,23 @@ func TestRunningDirtySQLCloseUsesSpecificSafeLanguage(t *testing.T) {
 	}
 }
 
+func TestRunningDirtyTableCloseUsesSpecificSafeLanguage(t *testing.T) {
+	model := workspaceFixture(t)
+	loadPublicRelations(t, &model)
+	model.moveTree(1)
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model.Update(TabStateChangedMsg{
+		Tab: model.activeTab, Dirty: true, DirtySet: true, Lifecycle: TabRunning,
+		Request: core.RequestMeta{Workspace: model.id, Tab: model.activeTab, Operation: "grid.apply.1", Request: 1},
+	})
+	model.focus = FocusTabs
+	model.Update(tea.KeyPressMsg{Code: 'x'})
+	view := model.View(ui.DefaultTheme())
+	if !strings.Contains(view, "Cancel operation and discard changes") || !strings.Contains(view, "staged changes and a running table operation") {
+		t.Fatalf("table close modal = %q", view)
+	}
+}
+
 func TestClosingRunningTabCancelsItsOperation(t *testing.T) {
 	model := workspaceFixture(t)
 	model.focus = FocusTabs

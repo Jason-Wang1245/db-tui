@@ -30,7 +30,12 @@ select
   c.oid,
   c.relkind::text,
   pg_catalog.has_table_privilege(c.oid, 'SELECT')
-    or pg_catalog.has_any_column_privilege(c.oid, 'SELECT')
+    or pg_catalog.has_any_column_privilege(c.oid, 'SELECT'),
+  pg_catalog.has_table_privilege(c.oid, 'INSERT')
+    or pg_catalog.has_any_column_privilege(c.oid, 'INSERT'),
+  pg_catalog.has_table_privilege(c.oid, 'UPDATE')
+    or pg_catalog.has_any_column_privilege(c.oid, 'UPDATE'),
+  pg_catalog.has_table_privilege(c.oid, 'DELETE')
 from pg_catalog.pg_class c
 join pg_catalog.pg_namespace n on n.oid = c.relnamespace
 where n.nspname = $1
@@ -47,6 +52,8 @@ select
   a.attgenerated <> '',
   a.attidentity <> '',
   pg_catalog.has_column_privilege($1::oid, a.attnum, 'SELECT'),
+  pg_catalog.has_column_privilege($1::oid, a.attnum, 'INSERT'),
+  pg_catalog.has_column_privilege($1::oid, a.attnum, 'UPDATE'),
   exists (
     select 1
     from pg_catalog.pg_operator o
@@ -85,8 +92,10 @@ limit 1`
 func (session *Session) Describe(ctx context.Context, relationID grid.RelationID) (grid.Relation, error) {
 	var oid uint32
 	var rawKind string
-	var canSelect bool
-	err := session.pool.QueryRow(ctx, relationMetadataQuery, relationID.Schema, relationID.Name).Scan(&oid, &rawKind, &canSelect)
+	var canSelect, canInsert, canUpdate, canDelete bool
+	err := session.pool.QueryRow(ctx, relationMetadataQuery, relationID.Schema, relationID.Name).Scan(
+		&oid, &rawKind, &canSelect, &canInsert, &canUpdate, &canDelete,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return grid.Relation{}, core.NewError(
 			"describe relation", core.ErrorValidation,
@@ -110,14 +119,21 @@ func (session *Session) Describe(ctx context.Context, relationID grid.RelationID
 		err := row.Scan(
 			&column.Name, &column.DataType, &column.TypeOID, &column.Nullable,
 			&column.HasDefault, &column.Generated, &column.Identity,
-			&column.CanSelect, &column.Sortable,
+			&column.CanSelect, &column.CanInsert, &column.CanUpdate, &column.Sortable,
 		)
 		return column, err
 	})
 	if err != nil {
 		return grid.Relation{}, ClassifyError("load column metadata", err)
 	}
-	for _, column := range columns {
+	for index := range columns {
+		if columns[index].Generated || columns[index].Identity {
+			columns[index].CanInsert = false
+			columns[index].CanUpdate = false
+		}
+	}
+	relation.MutationColumns = append([]grid.Column(nil), columns...)
+	for _, column := range relation.MutationColumns {
 		if column.CanSelect {
 			relation.Columns = append(relation.Columns, column)
 		}
@@ -151,6 +167,9 @@ func (session *Session) Describe(ctx context.Context, relationID grid.RelationID
 	for index := range relation.Columns {
 		relation.Columns[index].IdentityPart = slices.Contains(identity, relation.Columns[index].Name)
 	}
+	for index := range relation.MutationColumns {
+		relation.MutationColumns[index].IdentityPart = slices.Contains(identity, relation.MutationColumns[index].Name)
+	}
 
 	if len(identity) == 0 {
 		relation.BestEffort = true
@@ -158,7 +177,34 @@ func (session *Session) Describe(ctx context.Context, relationID grid.RelationID
 	} else if relation.Kind != grid.RelationTable && relation.Kind != grid.RelationPartitionedTable {
 		relation.ReadOnlyReason = "This relation type is browse-only."
 	} else {
-		relation.ReadOnlyReason = "Browsing only; staged editing is implemented in the next grid slice."
+		relation.CanInsert = canInsert
+		relation.CanUpdate = canUpdate
+		relation.CanDelete = canDelete
+		if !canInsert {
+			relation.InsertReason = "The current role has no usable INSERT privilege."
+		}
+		if !canUpdate {
+			relation.UpdateReason = "The current role has no usable UPDATE privilege."
+		}
+		if !canDelete {
+			relation.DeleteReason = "The current role has no DELETE privilege."
+		}
+		for _, column := range relation.MutationColumns {
+			if !column.Nullable && !column.HasDefault && !column.Generated && !column.Identity && (!column.CanInsert || !column.CanSelect) {
+				relation.CanInsert = false
+				relation.InsertReason = column.Name + " is required without a default but cannot be edited in this grid."
+				break
+			}
+		}
+		if relation.CanUpdate {
+			relation.CanUpdate = slices.ContainsFunc(relation.Columns, func(column grid.Column) bool { return column.CanUpdate })
+			if !relation.CanUpdate {
+				relation.UpdateReason = "No readable column is updatable for the current role."
+			}
+		}
+		if !relation.CanInsert && !relation.CanUpdate && !relation.CanDelete {
+			relation.ReadOnlyReason = "The current role has no usable INSERT, UPDATE, or DELETE privileges."
+		}
 	}
 	return relation, nil
 }
@@ -588,7 +634,26 @@ func formatCell(value any, column grid.Column) grid.Cell {
 		return grid.Cell{Null: true, Display: "NULL"}
 	}
 	normalized := normalizeValue(value)
-	return grid.Cell{Raw: normalized, Display: formatDisplayValue(normalized, column)}
+	return grid.Cell{Raw: normalized, Display: formatDisplayValue(normalized, column), Edit: editCellValue(normalized, column)}
+}
+
+func editCellValue(value any, column grid.Column) string {
+	switch value := value.(type) {
+	case string:
+		return value
+	case []byte:
+		if column.TypeOID == 17 || strings.HasPrefix(column.DataType, "bytea") {
+			return `\x` + hex.EncodeToString(value)
+		}
+		return string(value)
+	case time.Time:
+		if column.TypeOID == 1082 || column.DataType == "date" {
+			return value.Format("2006-01-02")
+		}
+		return value.Format(time.RFC3339Nano)
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func normalizeValue(value any) any {

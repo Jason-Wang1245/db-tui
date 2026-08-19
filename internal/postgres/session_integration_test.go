@@ -121,6 +121,23 @@ func TestSessionConnectsToSupportedPostgreSQL(t *testing.T) {
 		select 'note-' || value, value from generate_series(1, 125) value;
 		create table public."odd""name" (id integer primary key, value text);
 		insert into public."odd""name" values (1, E'hello\nworld');
+		create table public.crud_records (
+		  id bigint primary key,
+		  identity_value bigint generated always as identity,
+		  required_text text not null,
+		  optional_text text,
+		  count_value integer not null default 7,
+		  payload jsonb,
+		  generated_text text generated always as (required_text || '!') stored
+		);
+		create table public.slow_crud (id bigint primary key);
+		create function public.slow_crud_insert() returns trigger language plpgsql as $$
+		begin
+		  perform pg_sleep(10);
+		  return new;
+		end $$;
+		create trigger slow_crud_insert before insert on public.slow_crud
+		for each row execute function public.slow_crud_insert();
 	`); err != nil {
 		t.Fatalf("create browsing fixtures: %v", err)
 	}
@@ -208,6 +225,111 @@ func TestSessionConnectsToSupportedPostgreSQL(t *testing.T) {
 	}
 	if view.HasXMin || !view.BestEffort || view.Kind != grid.RelationView {
 		t.Fatalf("view metadata = %#v", view)
+	}
+
+	crud, err := session.Describe(ctx, grid.RelationID{Schema: "public", Name: "crud_records"})
+	if err != nil {
+		t.Fatalf("describe CRUD fixture: %v", err)
+	}
+	if !crud.CanInsert || !crud.CanUpdate || !crud.CanDelete || len(crud.Identity) != 1 || len(crud.Columns) != 7 ||
+		!crud.Columns[0].CanUpdate || !crud.Columns[1].Identity || crud.Columns[1].CanInsert || !crud.Columns[6].Generated || crud.Columns[6].CanUpdate {
+		t.Fatalf("CRUD metadata = %#v", crud)
+	}
+	inserted, err := session.Apply(ctx, grid.ApplyRequest{Relation: crud, Mutations: []grid.Mutation{{
+		Kind: grid.MutationInsert, DraftID: 1,
+		Values: map[string]grid.StagedValue{
+			"id":            {Kind: grid.ValueText, Text: "1"},
+			"required_text": {Kind: grid.ValueText, Text: ""},
+			"optional_text": {Kind: grid.ValueNull},
+			"payload":       {Kind: grid.ValueText, Text: `{"ok":true}`},
+		},
+	}}})
+	if err != nil || inserted.Inserted != 1 {
+		t.Fatalf("insert staged CRUD row: result=%#v err=%v", inserted, err)
+	}
+	crudPage, err := session.FetchPage(ctx, crud, grid.PageRequest{Relation: crud.ID, Direction: grid.PageFirst, Limit: 100})
+	if err != nil || len(crudPage.Rows) != 1 {
+		t.Fatalf("fetch inserted CRUD row: page=%#v err=%v", crudPage, err)
+	}
+	crudRow := crudPage.Rows[0]
+	if crudRow.Cells[2].Null || crudRow.Cells[2].Edit != "" || !crudRow.Cells[3].Null || crudRow.Cells[4].Display != "7" || crudRow.Cells[6].Display != "!" {
+		t.Fatalf("insert NULL/empty/default/generated values = %#v", crudRow.Cells)
+	}
+	updated, err := session.Apply(ctx, grid.ApplyRequest{Relation: crud, Mutations: []grid.Mutation{{
+		Kind: grid.MutationUpdate, Original: crudRow,
+		Values: map[string]grid.StagedValue{
+			"id":            {Kind: grid.ValueText, Text: "5"},
+			"required_text": {Kind: grid.ValueText, Text: "updated"},
+			"count_value":   {Kind: grid.ValueText, Text: "9"},
+		},
+	}}})
+	if err != nil || updated.Updated != 1 {
+		t.Fatalf("update staged CRUD row: result=%#v err=%v", updated, err)
+	}
+	current, err := session.FetchCurrentRow(ctx, crud.ID, map[string]any{"id": int64(5)})
+	if err != nil || current.Cells[2].Display != "updated" || current.Cells[4].Display != "9" || current.Cells[6].Display != "updated!" {
+		t.Fatalf("updated/default-generated CRUD row=%#v err=%v", current, err)
+	}
+	if _, err := session.pool.Exec(ctx, `update public.crud_records set optional_text = 'concurrent' where id = 5`); err != nil {
+		t.Fatalf("create optimistic conflict: %v", err)
+	}
+	_, err = session.Apply(ctx, grid.ApplyRequest{Relation: crud, Mutations: []grid.Mutation{{
+		Kind: grid.MutationUpdate, Original: current,
+		Values: map[string]grid.StagedValue{"count_value": {Kind: grid.ValueText, Text: "10"}},
+	}}})
+	var conflict *grid.MutationError
+	var conflictCore *core.Error
+	if !errors.As(err, &conflict) || !errors.As(err, &conflictCore) || conflictCore.Category != core.ErrorConflict ||
+		conflict.Current == nil || conflict.Current.Cells[3].Display != "concurrent" {
+		t.Fatalf("optimistic conflict = %#v core=%#v", err, conflictCore)
+	}
+	current, err = session.FetchCurrentRow(ctx, crud.ID, map[string]any{"id": int64(5)})
+	if err != nil {
+		t.Fatalf("reload current CRUD row: %v", err)
+	}
+	_, err = session.Apply(ctx, grid.ApplyRequest{Relation: crud, Mutations: []grid.Mutation{
+		{Kind: grid.MutationUpdate, Original: current, Values: map[string]grid.StagedValue{"count_value": {Kind: grid.ValueText, Text: "11"}}},
+		{Kind: grid.MutationInsert, DraftID: 2, Values: map[string]grid.StagedValue{"payload": {Kind: grid.ValueText, Text: "not-json"}}},
+	}})
+	var castFailure *grid.MutationError
+	var castCore *core.Error
+	if !errors.As(err, &castFailure) || castFailure.Mutation != 1 || castFailure.Column != "payload" ||
+		!errors.As(err, &castCore) || castCore.PostgreSQL == nil || castCore.PostgreSQL.SQLState != "22P02" {
+		t.Fatalf("raw PostgreSQL cast failure = %#v core=%#v", err, castCore)
+	}
+	current, err = session.FetchCurrentRow(ctx, crud.ID, map[string]any{"id": int64(5)})
+	if err != nil || current.Cells[4].Display != "9" {
+		t.Fatalf("failed batch was not fully rolled back: row=%#v err=%v", current, err)
+	}
+	deleted, err := session.Apply(ctx, grid.ApplyRequest{Relation: crud, Mutations: []grid.Mutation{{
+		Kind: grid.MutationDelete, Original: current,
+	}}})
+	if err != nil || deleted.Deleted != 1 {
+		t.Fatalf("delete staged CRUD row: result=%#v err=%v", deleted, err)
+	}
+	slowCRUD, err := session.Describe(ctx, grid.RelationID{Schema: "public", Name: "slow_crud"})
+	if err != nil {
+		t.Fatalf("describe cancellation fixture: %v", err)
+	}
+	applyContext, cancelApply := context.WithCancel(ctx)
+	applyCancelled := make(chan error, 1)
+	go func() {
+		_, applyErr := session.Apply(applyContext, grid.ApplyRequest{Relation: slowCRUD, Mutations: []grid.Mutation{{
+			Kind:   grid.MutationInsert,
+			Values: map[string]grid.StagedValue{"id": {Kind: grid.ValueText, Text: "1"}},
+		}}})
+		applyCancelled <- applyErr
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancelApply()
+	var cancelledMutation *grid.MutationError
+	var cancelledApplyCore *core.Error
+	if err := <-applyCancelled; !errors.As(err, &cancelledMutation) || !errors.As(err, &cancelledApplyCore) || cancelledApplyCore.Category != core.ErrorCancellation {
+		t.Fatalf("cancelled apply error = %#v", err)
+	}
+	slowPage, err := session.FetchPage(ctx, slowCRUD, grid.PageRequest{Relation: slowCRUD.ID, Direction: grid.PageFirst, Limit: 100})
+	if err != nil || len(slowPage.Rows) != 0 {
+		t.Fatalf("cancelled apply was not rolled back: page=%#v err=%v", slowPage, err)
 	}
 
 	batch, err := session.Execute(ctx, sqltab.RunRequest{Snapshot: `

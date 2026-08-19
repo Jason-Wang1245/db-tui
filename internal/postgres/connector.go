@@ -176,6 +176,11 @@ func classifyPostgreSQLError(operation string, err *pgconn.PgError, cause error)
 		category = core.ErrorNetwork
 		summary = "PostgreSQL closed the connection. Check server availability and network access."
 		retryable = true
+	case strings.HasPrefix(err.Code, "23"):
+		category = core.ErrorConstraint
+	case err.Code == "40001" || err.Code == "40P01":
+		category = core.ErrorConflict
+		retryable = true
 	}
 	classified := core.NewError(operation, category, summary, retryable, cause)
 	classified.PostgreSQL = details

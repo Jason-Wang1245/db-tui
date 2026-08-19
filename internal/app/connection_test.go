@@ -72,13 +72,16 @@ func (connector *fakeConnector) Connect(context.Context, launcher.ConnectionTarg
 }
 
 type fakeSession struct {
-	closes    int
-	pingError error
-	schemas   []workspace.Schema
-	relations map[string][]workspace.Relation
-	sqlResult sqltab.RunResult
-	sqlError  error
-	sqlRuns   []sqltab.RunRequest
+	closes      int
+	pingError   error
+	schemas     []workspace.Schema
+	relations   map[string][]workspace.Relation
+	sqlResult   sqltab.RunResult
+	sqlError    error
+	sqlRuns     []sqltab.RunRequest
+	applyResult grid.ApplyResult
+	applyError  error
+	applyRuns   []grid.ApplyRequest
 }
 
 func (session *fakeSession) Ping(context.Context) error { return session.pingError }
@@ -99,10 +102,10 @@ func (session *fakeSession) Relations(_ context.Context, schema string) ([]works
 func (*fakeSession) Describe(_ context.Context, relation grid.RelationID) (grid.Relation, error) {
 	return grid.Relation{
 		ID: relation, Kind: grid.RelationTable, Identity: []string{"id"}, IdentityPrimary: true,
-		CanSelect: true, HasXMin: true, ReadOnlyReason: "Browsing only.",
+		CanSelect: true, CanInsert: true, CanUpdate: true, CanDelete: true, HasXMin: true,
 		Columns: []grid.Column{
-			{Name: "id", DataType: "bigint", TypeOID: 20, CanSelect: true, Sortable: true, IdentityPart: true},
-			{Name: "email", DataType: "text", TypeOID: 25, CanSelect: true, Sortable: true},
+			{Name: "id", DataType: "bigint", TypeOID: 20, CanSelect: true, CanInsert: true, CanUpdate: true, Sortable: true, IdentityPart: true},
+			{Name: "email", DataType: "text", TypeOID: 25, CanSelect: true, CanInsert: true, CanUpdate: true, Sortable: true},
 		},
 	}, nil
 }
@@ -110,7 +113,7 @@ func (*fakeSession) Describe(_ context.Context, relation grid.RelationID) (grid.
 func (*fakeSession) FetchPage(_ context.Context, _ grid.Relation, request grid.PageRequest) (grid.Page, error) {
 	return grid.Page{Rows: []grid.Row{{
 		Identity: map[string]any{"id": int64(1)}, XMin: 7,
-		Cells: []grid.Cell{{Raw: int64(1), Display: "1"}, {Raw: "a@example.com", Display: "a@example.com"}},
+		Cells: []grid.Cell{{Raw: int64(1), Display: "1", Edit: "1"}, {Raw: "a@example.com", Display: "a@example.com", Edit: "a@example.com"}},
 	}}}, nil
 }
 
@@ -141,6 +144,28 @@ func (session *fakeSession) Execute(_ context.Context, request sqltab.RunRequest
 			{{Raw: int32(42), Display: "42", Full: "42"}},
 		},
 	}}}, nil
+}
+
+func (session *fakeSession) Apply(_ context.Context, request grid.ApplyRequest) (grid.ApplyResult, error) {
+	session.applyRuns = append(session.applyRuns, request)
+	if session.applyError != nil {
+		return grid.ApplyResult{}, session.applyError
+	}
+	if session.applyResult != (grid.ApplyResult{}) {
+		return session.applyResult, nil
+	}
+	result := grid.ApplyResult{}
+	for _, mutation := range request.Mutations {
+		switch mutation.Kind {
+		case grid.MutationInsert:
+			result.Inserted++
+		case grid.MutationUpdate:
+			result.Updated++
+		case grid.MutationDelete:
+			result.Deleted++
+		}
+	}
+	return result, nil
 }
 
 func connectionFixture() (*fakeProfileService, *fakeConnector) {
@@ -301,6 +326,46 @@ func TestConnectedWorkspaceLoadsCatalogOpensTableAndDisconnects(t *testing.T) {
 	if view := model.View().Content; !strings.Contains(view, "public.users") || !strings.Contains(view, "a@example.com") {
 		t.Fatalf("table grid view = %q", view)
 	}
+
+	// Grid editing captures ordinary text that would otherwise be a workspace
+	// shortcut, then applies an immutable staged snapshot and reloads the page.
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyRight})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'e'})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'q', Text: "q"})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEnter})
+	tabID := model.workspace.ActiveTab()
+	if !model.tables[tabID].Dirty() || !model.workspace.Tabs()[0].Envelope.Dirty {
+		t.Fatalf("staged grid state: table=%#v tabs=%#v", model.tables[tabID], model.workspace.Tabs())
+	}
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'a'})
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEnter})
+	model, command = updateApp(t, model, command())
+	model, command = updateApp(t, model, command())
+	model, command = updateApp(t, model, command())
+	model, command = updateApp(t, model, command())
+	if len(connector.session.applyRuns) != 1 || len(connector.session.applyRuns[0].Mutations) != 1 ||
+		connector.session.applyRuns[0].Mutations[0].Values["email"].Text != "a@example.comq" || model.tables[tabID].Dirty() {
+		t.Fatalf("grid apply runs=%#v table=%#v", connector.session.applyRuns, model.tables[tabID])
+	}
+
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyRight})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'e'})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'x', Text: ".pending"})
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: tea.KeyEnter})
+	oldSession := connector.session
+	oldSession.pingError = core.NewError("ping", core.ErrorNetwork, "PostgreSQL closed the connection.", true, nil)
+	model, command = updateApp(t, model, model.workspace.CheckConnectionNow())
+	model, command = updateApp(t, model, command())
+	model, _ = updateApp(t, model, command())
+	newSession := &fakeSession{}
+	connector.session = newSession
+	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'r'})
+	model, command = updateApp(t, model, command())
+	model, _ = updateApp(t, model, command())
+	if model.applier != newSession || !model.tables[tabID].Dirty() || !model.workspace.Tabs()[0].Envelope.Dirty {
+		t.Fatalf("staged grid reconnect: applier=%T table=%#v tabs=%#v", model.applier, model.tables[tabID], model.workspace.Tabs())
+	}
+	model, _ = updateApp(t, model, tea.KeyPressMsg{Code: 'u'})
 
 	model, command = updateApp(t, model, tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	model, command = updateApp(t, model, command())

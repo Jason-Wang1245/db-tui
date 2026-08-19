@@ -94,3 +94,14 @@ func TestClassifyErrorShowsPostgreSQLBrowseMessage(t *testing.T) {
 		t.Fatalf("permission browse error = %#v", permission)
 	}
 }
+
+func TestClassifyErrorCategorizesConstraintAndTransactionConflicts(t *testing.T) {
+	constraint := ClassifyError("apply staged changes", &pgconn.PgError{Code: "23505", Message: "duplicate key"})
+	if constraint.Category != core.ErrorConstraint || constraint.PostgreSQL == nil {
+		t.Fatalf("constraint classification = %#v", constraint)
+	}
+	conflict := ClassifyError("apply staged changes", &pgconn.PgError{Code: "40001", Message: "serialization failure"})
+	if conflict.Category != core.ErrorConflict || !conflict.Retryable {
+		t.Fatalf("transaction conflict classification = %#v", conflict)
+	}
+}

@@ -22,9 +22,12 @@ func (model Model) View(theme ui.Theme) ViewData {
 	height := max(1, model.height)
 	lines := make([]string, height)
 	title := model.relationID.Schema + "." + model.relationID.Name
+	if model.Dirty() {
+		title += fmt.Sprintf(" · %d staged", model.changeCount())
+	}
 	lines[0] = fit(theme.Title.Render(title), width)
 
-	if model.err != nil {
+	if model.err != nil && model.failedKind != operationApply {
 		model.renderError(lines, width)
 		return completedView(lines, width, "r retry · Ctrl+C cancel · ? help", model.status)
 	}
@@ -34,37 +37,50 @@ func (model Model) View(theme ui.Theme) ViewData {
 		}
 		return completedView(lines, width, "Ctrl+C cancel · ? help", model.status)
 	}
+	if model.editor != nil {
+		model.renderCellEditor(lines, width, theme)
+		return completedView(lines, width, "Enter stage · Esc cancel · NULL and DEFAULT are explicit grid actions", model.status)
+	}
+	if model.overlay != overlayNone {
+		model.renderOverlay(lines, width, theme)
+		return completedView(lines, width, model.overlayHints(), model.status)
+	}
 
 	notice := model.relation.ReadOnlyReason
 	if model.page.BestEffort || model.relation.BestEffort {
 		notice = "Best-effort read-only paging: concurrent changes may repeat or skip rows."
 	}
 	if notice == "" {
-		notice = "Read-only browsing · staged changes: 0"
+		inserts, updates, deletes := model.changeCounts()
+		notice = fmt.Sprintf("Staged: %d insert · %d update · %d delete", inserts, updates, deletes)
 	}
 	if height > 1 {
 		lines[1] = fit(theme.Muted.Render(notice), width)
 	}
-	if height < 5 {
+	if height < 6 {
 		return completedView(lines, width, model.hints(), model.status)
 	}
+	lines[2] = fit(model.actionLine(), width)
 
 	visible := model.visibleColumns()
 	if len(visible) == 0 {
-		lines[2] = fit("No readable columns.", width)
+		lines[3] = fit("No readable columns.", width)
 		return completedView(lines, width, model.hints(), model.status)
 	}
-	lines[2] = model.renderHeader(visible, width)
-	lines[3] = fit(strings.Repeat("─", width), width)
+	lines[3] = model.renderHeader(visible, width)
+	lines[4] = fit(strings.Repeat("─", width), width)
 	rowCapacity := model.visibleRowCount()
-	for row := 0; row < rowCapacity && model.rowOffset+row < len(model.page.Rows); row++ {
+	for row := 0; row < rowCapacity && model.rowOffset+row < model.totalRows(); row++ {
 		index := model.rowOffset + row
-		lines[4+row] = model.renderRow(index, visible, width)
+		lines[5+row] = model.renderRow(index, visible, width)
 	}
-	if len(model.page.Rows) == 0 && !model.Busy() {
-		lines[4] = fit("No rows found.", width)
+	if model.totalRows() == 0 && !model.Busy() {
+		lines[5] = fit("No rows found.", width)
 	}
-	footer := fmt.Sprintf("Page %d · %d rows", max(1, model.pageNumber), len(model.page.Rows))
+	footer := fmt.Sprintf("Page %d · %d fetched rows", max(1, model.pageNumber), len(model.page.Rows))
+	if len(model.inserts) > 0 {
+		footer += fmt.Sprintf(" · %d pinned draft(s)", len(model.inserts))
+	}
 	if model.page.PrevCursor != "" {
 		footer += " · previous"
 	}
@@ -73,6 +89,10 @@ func (model Model) View(theme ui.Theme) ViewData {
 	}
 	lines[height-1] = fit(theme.Muted.Render(footer), width)
 	return completedView(lines, width, model.hints(), model.status)
+}
+
+func (model Model) actionLine() string {
+	return "[Insert i] [Edit e] [NULL z] [Default f] [Delete d] [Apply a] [Revert row u] [Revert all U] [Changes v]"
 }
 
 func completedView(lines []string, width int, hints, status string) ViewData {
@@ -124,23 +144,49 @@ func (model Model) renderHeader(columns []int, width int) string {
 }
 
 func (model Model) renderRow(rowIndex int, columns []int, width int) string {
-	row := model.page.Rows[rowIndex]
-	prefix := "  "
+	reference, ok := model.rowReferenceAt(rowIndex)
+	if !ok {
+		return fit("", width)
+	}
+	marker := " "
+	if reference.Insert {
+		marker = "+"
+	} else if _, deleted := model.deletes[reference.Key]; deleted {
+		marker = "×"
+	} else if _, updated := model.updates[reference.Key]; updated {
+		marker = "~"
+	}
+	prefix := " " + marker
 	if rowIndex == model.selectedRow {
-		prefix = "> "
+		prefix = ">" + marker
 	}
 	parts := make([]string, 0, len(columns))
 	for _, index := range columns {
-		value := ""
-		if index < len(row.Cells) {
-			value = row.Cells[index].Display
+		cell := model.cellAt(reference, index)
+		value := cell.Display
+		column := model.relation.Columns[index]
+		if reference.Insert && value == "DEFAULT" && !column.Nullable && !column.HasDefault && !column.Generated && !column.Identity {
+			value = "!REQUIRED"
+		}
+		if !reference.Insert {
+			if mutation, updated := model.updates[reference.Key]; updated {
+				if _, changed := mutation.Values[column.Name]; changed {
+					value += " *"
+				}
+			}
 		}
 		if rowIndex == model.selectedRow && index == model.selectedColumn {
 			value = "[" + value + "]"
 		}
 		parts = append(parts, fit(value, model.columnWidths[index]))
 	}
-	return fit(prefix+strings.Join(parts, "│"), width)
+	line := prefix + strings.Join(parts, "│")
+	if !reference.Insert {
+		if _, deleted := model.deletes[reference.Key]; deleted {
+			line = "\x1b[2m" + line + "\x1b[22m"
+		}
+	}
+	return fit(line, width)
 }
 
 func (model Model) renderError(lines []string, width int) {
@@ -177,6 +223,9 @@ func (model Model) renderError(lines []string, width int) {
 func (model Model) hints() string {
 	if model.Busy() {
 		return "Ctrl+C cancel · ? help"
+	}
+	if model.relation != nil && (model.relation.CanInsert || model.relation.CanUpdate || model.relation.CanDelete) {
+		return "e edit · i insert · z NULL · f default · d delete · a apply · u revert · v changes"
 	}
 	return "↑/↓ rows · ←/→ columns · n/p page · s sort · r refresh"
 }

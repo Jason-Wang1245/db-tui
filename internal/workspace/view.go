@@ -100,6 +100,15 @@ func (model Model) modalView(theme ui.Theme) string {
 					case tab.Envelope.Dirty:
 						body = tab.Envelope.Title + " contains session-local SQL."
 					}
+				} else if tab.Envelope.Kind == TabTable {
+					switch {
+					case tab.Envelope.Lifecycle == TabRunning && tab.Envelope.Dirty:
+						body = tab.Envelope.Title + " has staged changes and a running table operation."
+					case tab.Envelope.Lifecycle == TabRunning:
+						body = tab.Envelope.Title + " has a running table operation."
+					case tab.Envelope.Dirty:
+						body = tab.Envelope.Title + " has staged insert, update, or delete changes."
+					}
 				}
 				break
 			}
@@ -151,6 +160,15 @@ func (model Model) modalDestructiveLabel() string {
 					return "Cancel run and close"
 				case tab.Envelope.Dirty:
 					return "Discard SQL"
+				}
+			} else if tab.Envelope.Kind == TabTable {
+				switch {
+				case tab.Envelope.Lifecycle == TabRunning && tab.Envelope.Dirty:
+					return "Cancel operation and discard changes"
+				case tab.Envelope.Lifecycle == TabRunning:
+					return "Cancel operation and close"
+				case tab.Envelope.Dirty:
+					return "Discard staged changes"
 				}
 			}
 			break
@@ -464,6 +482,9 @@ func (model Model) helpView(theme ui.Theme) string {
 		"SQL: F5 / F6 / F7   execute / run all / rerun",
 		"SQL: Shift+arrows   select text; Esc leaves editor mode",
 		"SQL results         n/p page; {/} output; Enter inspect; c copy",
+		"Grid: i/e/d         insert draft / edit cell / stage delete",
+		"Grid: z/f           set SQL NULL / DEFAULT",
+		"Grid: a/u/U/v       apply / revert row / revert all / summary",
 		"r                   refresh objects; reconnect when offline",
 		"Ctrl+C              cancel active work; quit when idle",
 		"Ctrl+D              disconnect",

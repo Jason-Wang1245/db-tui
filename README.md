@@ -2,8 +2,8 @@
 
 `db-tui` is a PostgreSQL management terminal UI under active development. It
 currently includes secure connection management, the connected workspace,
-paginated table browsing, and isolated multi-result SQL execution; staged grid
-CRUD is the next implementation slice.
+paginated table browsing, transactional staged grid CRUD, and isolated
+multi-result SQL execution.
 
 ## Requirements
 
@@ -47,6 +47,12 @@ The connected workspace provides:
   pagination for keyed relations and labelled best-effort browsing otherwise
 - Per-column sorting, refresh, responsive column sizing, horizontal navigation,
   safe PostgreSQL value formatting, and recoverable detailed database errors
+- Per-tab insert, update, and delete staging with pinned drafts, inline changed
+  values, delete tombstones, change summaries, and safe refresh/close decisions
+- Atomic apply transactions with client-side scalar validation, explicit
+  `NULL`/empty-string/`DEFAULT` values, generated-column protection, `xmin`
+  conflict detection, full rollback, and prominent PostgreSQL cast/constraint
+  details for raw and non-primitive values
 - Independent multiline SQL editors with selection execution, run-all and exact
   rerun actions, ordered row/command/error outputs, notices, and cancellation
 - Per-execution PostgreSQL sessions with rollback/reset cleanup, 10,000-row and
@@ -64,7 +70,12 @@ In a table grid, use arrows or `h`/`j`/`k`/`l` to move between cells, `n`/`p`
 or Page Down/Page Up to change pages, `s` to cycle the selected column through
 ascending, descending, and default order, and `r` to refresh from page one.
 Clicking selects a cell; the wheel moves by rows and Shift+wheel moves by
-columns. `Ctrl+C` cancels an active load, which can then be rerun normally.
+columns. Press `i` to add a pinned draft, `e` or `Enter` to edit a cell, `z` to
+stage SQL `NULL`, `f` to stage `DEFAULT`, and `d` to toggle a delete tombstone.
+Use `u` to revert the selected row, `U` to confirm reverting the whole tab, `v`
+for the complete change summary, and `a` to review and atomically apply all
+staged changes. A dirty refresh offers Apply, Revert and refresh, or Cancel.
+`Ctrl+C` cancels an active load or apply while keeping staged work retryable.
 
 In a SQL editor, `Tab` inserts two spaces, Shift+arrows selects text,
 `Ctrl+Z` / `Ctrl+Y` undo and redo, and `Esc` enters navigation mode so workspace
@@ -76,7 +87,6 @@ In SQL results, use arrows to move between cells, `n` / `p` for client-side
 pages, `{` / `}` for ordered outputs, `Enter` for the full-value inspector, `v`
 to select rows, and `c` / `Shift+C` to copy cells or rows. SQL buffers and only
 their most recent results are session-local—there is no history or persistence.
-Table tabs remain browse-only until staged CRUD is implemented.
 
 ## Profiles and passwords
 

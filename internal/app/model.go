@@ -60,6 +60,7 @@ type Model struct {
 	workspaceReady bool
 	catalog        workspace.CatalogReader
 	browser        grid.TableBrowser
+	applier        grid.MutationApplier
 	tables         map[core.TabID]grid.Model
 	executor       sqltab.SQLExecutor
 	sqlTabs        map[core.TabID]sqltab.Model
@@ -166,11 +167,15 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, model.describeTable(message)
 	case grid.LoadPageIntent:
 		return model, model.loadTablePage(message)
+	case grid.ApplyIntent:
+		return model, model.applyTableChanges(message)
 	case grid.CancelIntent:
 		return model, model.cancelTable(message)
 	case grid.RelationDescribedMsg:
 		return model.updateTable(message.Meta.Tab, message)
 	case grid.PageLoadedMsg:
+		return model.updateTable(message.Meta.Tab, message)
+	case grid.AppliedMsg:
 		return model.updateTable(message.Meta.Tab, message)
 	case grid.OperationFailedMsg:
 		return model.updateTable(message.Meta.Tab, message)
@@ -208,6 +213,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.surface = surfaceWorkspace
 		model.catalog = catalog
 		model.browser = browserFromSession(message.session)
+		model.applier = applierFromSession(message.session)
 		model.executor = executorFromSession(message.session)
 		model.tables = make(map[core.TabID]grid.Model)
 		model.sqlTabs = make(map[core.TabID]sqltab.Model)
@@ -238,6 +244,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.session = message.session
 		model.catalog = catalog
 		model.browser = browserFromSession(message.session)
+		model.applier = applierFromSession(message.session)
 		model.executor = executorFromSession(message.session)
 		model.connection = message.info
 		model.diagnostics.Record(Diagnostic{Operation: "reconnect", Status: "success"})
@@ -246,6 +253,9 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if model.surface == surfaceWorkspace && model.workspaceReady {
 			if model.activeSQLCaptures(message) {
 				return model.routeToSQL(message)
+			}
+			if model.activeGridCaptures(message) {
+				return model.routeToTable(message)
 			}
 			if message.Keystroke() == "ctrl+c" {
 				if model.workspace.RoutesToContent(message) {
@@ -270,6 +280,9 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if model.workspaceReady && model.surface == surfaceWorkspace {
 		if model.activeSQLCaptures(message) {
 			return model.routeToSQL(message)
+		}
+		if model.activeGridCaptures(message) {
+			return model.routeToTable(message)
 		}
 		if model.workspace.RoutesToContent(message) {
 			return model.routeToActiveContent(message)
@@ -489,6 +502,20 @@ func (model Model) loadTablePage(intent grid.LoadPageIntent) tea.Cmd {
 	})
 }
 
+func (model Model) applyTableChanges(intent grid.ApplyIntent) tea.Cmd {
+	applier := model.applier
+	return model.runWorkspace(intent.Meta, func(ctx context.Context) tea.Msg {
+		if applier == nil {
+			return grid.ApplyFailed(intent.Meta, applierUnavailableError())
+		}
+		result, err := applier.Apply(ctx, intent.Request)
+		if err != nil {
+			return grid.ApplyFailed(intent.Meta, err)
+		}
+		return grid.AppliedMsg{Result: result, Meta: intent.Meta}
+	})
+}
+
 func (model Model) cancelTable(intent grid.CancelIntent) tea.Cmd {
 	registry := model.cancellations
 	return func() tea.Msg {
@@ -694,6 +721,25 @@ func (model Model) activeSQLCaptures(message tea.Msg) bool {
 	}
 }
 
+func (model Model) activeGridCaptures(message tea.Msg) bool {
+	if !model.workspace.AllowsContentInput() {
+		return false
+	}
+	state, ok := model.activeTable()
+	if !ok || !state.Captures(message) || model.workspace.Focus() != workspace.FocusContent {
+		return false
+	}
+	switch message := message.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg:
+		return true
+	case tea.MouseClickMsg, tea.MouseWheelMsg:
+		mouse := message.(interface{ Mouse() tea.Mouse }).Mouse()
+		return model.workspace.ContentRect().Contains(mouse.X, mouse.Y)
+	default:
+		return false
+	}
+}
+
 func (model *Model) syncTableState(tab core.TabID, table grid.Model) {
 	lifecycle := workspace.TabIdle
 	switch table.Lifecycle() {
@@ -703,7 +749,8 @@ func (model *Model) syncTableState(tab core.TabID, table grid.Model) {
 		lifecycle = workspace.TabFailed
 	}
 	model.workspace.Update(workspace.TabStateChangedMsg{
-		Tab: tab, Lifecycle: lifecycle, Request: table.ActiveMeta(),
+		Tab: tab, Dirty: table.Dirty(), DirtySet: true,
+		Lifecycle: lifecycle, Request: table.ActiveMeta(),
 	})
 }
 
@@ -768,6 +815,13 @@ func browserFromSession(session launcher.Session) grid.TableBrowser {
 	return nil
 }
 
+func applierFromSession(session launcher.Session) grid.MutationApplier {
+	if applier, ok := session.(grid.MutationApplier); ok {
+		return applier
+	}
+	return nil
+}
+
 func executorFromSession(session launcher.Session) sqltab.SQLExecutor {
 	if executor, ok := session.(sqltab.SQLExecutor); ok {
 		return executor
@@ -779,6 +833,13 @@ func browserUnavailableError() *core.Error {
 	return core.NewError(
 		"browse table", core.ErrorInternal,
 		"This connection does not expose PostgreSQL table browsing.", false, nil,
+	)
+}
+
+func applierUnavailableError() *core.Error {
+	return core.NewError(
+		"apply staged changes", core.ErrorInternal,
+		"This connection does not expose PostgreSQL grid mutation support.", false, nil,
 	)
 }
 
@@ -866,6 +927,7 @@ func (model Model) disconnectWorkspace() (tea.Model, tea.Cmd) {
 	model.session = nil
 	model.catalog = nil
 	model.browser = nil
+	model.applier = nil
 	model.executor = nil
 	model.tables = make(map[core.TabID]grid.Model)
 	model.sqlTabs = make(map[core.TabID]sqltab.Model)
@@ -1085,7 +1147,10 @@ func (model Model) workspaceView() string {
 	content := workspace.ContentView{}
 	if table, ok := model.activeTable(); ok {
 		view := table.View(model.theme)
-		content = workspace.ContentView{Lines: view.Lines, Hints: view.Hints, Status: view.Status}
+		content = workspace.ContentView{
+			Lines: view.Lines, Hints: view.Hints, Status: view.Status,
+			ConsumesGlobalKeys: table.Editing() || table.OverlayOpen(),
+		}
 	} else if state, ok := model.activeSQL(); ok {
 		view := state.View(model.theme)
 		content = workspace.ContentView{
