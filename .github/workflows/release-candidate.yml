@@ -16,7 +16,7 @@ jobs:
       matrix:
         postgresql: ['14', '15', '16', '17', '18']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -47,7 +47,7 @@ jobs:
             goarch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
